@@ -1,0 +1,16 @@
+# Live configuration. Note that setting mode: LIVE and live_trading: true here is only
+# KEY 1. Key 2 is config/live_arming.json, whose account_login must match the connected
+# MT5 account. Both are required; neither alone arms live trading.
+env: live
+mode: LIVE
+live_trading: true
+broker:
+  kind: mt5_grpc
+risk:
+  # Stage 6 starts far below the class caps regardless of A / A+ classification.
+  global_risk_cap_pct: 0.0025
+database:
+  url: postgresql+psycopg://xauusd:xauusd@localhost:5432/xauusd
+alerts:
+  telegram_enabled: true
+  min_level: INFO

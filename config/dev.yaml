@@ -1,0 +1,6 @@
+env: dev
+mode: PAPER
+log_json: false
+log_level: DEBUG
+database:
+  url: sqlite:///data/xauusd_dev.db

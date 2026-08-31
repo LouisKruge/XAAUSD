@@ -1,0 +1,9 @@
+env: demo
+mode: DEMO
+broker:
+  kind: mt5_grpc
+  bridge_address: 127.0.0.1:50551
+database:
+  url: postgresql+psycopg://xauusd:xauusd@localhost:5432/xauusd
+alerts:
+  telegram_enabled: true

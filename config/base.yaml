@@ -1,0 +1,146 @@
+# Base configuration. Overridden by {env}.yaml then local.yaml then XAUUSD_* env vars.
+# Values here are STARTING POINTS. Thresholds marked (validated) must be replaced with
+# numbers produced by the Phase 10 validation run before any live deployment.
+
+env: dev
+mode: PAPER
+live_trading: false
+symbol: XAUUSD
+log_level: INFO
+log_json: true
+decision_interval_seconds: 300
+
+enabled_strategies:
+  - sweep_mss_fvg
+  - sweep_mss_ob
+
+risk:
+  risk_pct_a: 0.01
+  risk_pct_a_plus: 0.02
+  global_risk_cap_pct: 0.02        # lower this for Stage 6 (e.g. 0.0025)
+  max_daily_drawdown_pct: 0.02
+  max_weekly_drawdown_pct: 0.05
+  max_monthly_drawdown_pct: 0.10
+  max_total_open_risk_pct: 0.02
+  max_concurrent_positions: 1
+  max_trades_per_day: 3
+  max_consecutive_losses_lockout: 4
+  drawdown_from_peak: true
+  daily_reset_hour_broker: 0
+  weekly_lockout_needs_manual_clear: true
+  monthly_lockout_needs_manual_clear: true
+  margin_safety_factor: 0.30
+  sizing_cross_check_tolerance: 0.02
+  commission_per_lot: 7.0
+  slippage_points_estimate: 15.0
+
+execution:
+  max_spread_points: 50.0
+  max_spread_ratio: 2.5
+  max_quote_age_seconds: 10.0
+  max_bar_age_seconds: 420.0
+  max_entry_drift_r: 0.15
+  max_slippage_points: 25
+  max_send_retries: 2
+  require_server_side_stop: true
+  break_even_at_r: 1.0
+  break_even_offset_r: 0.05
+  partial_tp_enabled: false
+  trail_enabled: true
+  trail_activate_r: 1.5
+  time_stop_bars: 48
+  time_stop_min_r: 0.3
+  invalidation_exit_enabled: true
+  flat_before_weekend: true
+
+thresholds:                         # (validated) — placeholders until Phase 10
+  a_score_min: 70.0
+  a_plus_score_min: 85.0
+  a_probability_min: 0.55
+  a_plus_probability_min: 0.65
+  a_strong_categories_min: 5
+  a_plus_strong_categories_min: 7
+  min_rr: 2.0
+  preferred_rr: 3.0
+  require_probability_model: false
+
+scoring:                            # (validated) — validator enforces a total of exactly 100.
+                                    # The brief's example totalled 95; the spare 5 points
+                                    # are given to entry_confirmation.
+  htf_bias: 15.0
+  market_structure: 15.0
+  liquidity: 15.0
+  fvg_ob: 10.0
+  support_resistance: 10.0
+  fundamentals: 10.0
+  dxy_yields: 5.0
+  session: 5.0
+  volatility_regime: 5.0
+  entry_confirmation: 10.0
+
+structure:
+  swing_lookback: 2
+  swing_min_atr: 0.25
+  bos_min_displacement_atr: 0.5
+  bos_min_body_ratio: 0.5
+  bos_require_body_close: true
+  mss_min_displacement_atr: 0.75
+  atr_period: 14
+
+liquidity:
+  equal_level_tolerance_atr: 0.10
+  min_equal_touches: 2
+  sweep_min_penetration_atr: 0.05
+  sweep_max_penetration_atr: 1.5
+  sweep_min_rejection_ratio: 0.35
+  sweep_max_bars_to_reject: 3
+  sweep_require_close_back_inside: true
+  displacement_after_sweep_atr: 0.5
+
+fvg:
+  min_size_atr: 0.15
+  min_displacement_atr: 0.5
+  mitigation_threshold: 0.5
+  prefer_consequent_encroachment: true
+
+order_block:
+  require_bos: true
+  min_displacement_atr: 0.6
+  use_wick_extremes: true
+
+session:
+  allowed_sessions: [LONDON, NEW_YORK, OVERLAP]
+  allowed_weekdays: [0, 1, 2, 3, 4]
+  block_first_minutes_of_week: 60
+  block_last_minutes_of_week: 120
+
+regime:
+  strong_trend_adx: 30.0
+  moderate_trend_adx: 20.0
+  abnormal_atr_multiple: 3.0
+  abnormal_spread_multiple: 4.0
+  allowed_regimes: [STRONG_BULL, MODERATE_BULL, RANGE, MODERATE_BEAR, STRONG_BEAR]
+
+news:
+  blackout_minutes_before: {CRITICAL: 60, HIGH: 30, MEDIUM: 15, LOW: 0}
+  blackout_minutes_after: {CRITICAL: 30, HIGH: 15, MEDIUM: 10, LOW: 0}
+  require_spread_normalised_after: true
+  max_macro_age_days: 3
+  news_risk_blocks_a_plus: HIGH
+  news_risk_blackout: EXTREME
+  max_news_score_contribution: 4.0
+  llm_enabled: false
+
+data:
+  synthetic_dxy: true
+  lake_path: data/lake
+
+broker:
+  kind: sim
+  magic: 20260831
+
+database:
+  url: sqlite:///data/xauusd.db
+
+alerts:
+  min_level: WARNING

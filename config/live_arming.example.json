@@ -1,0 +1,6 @@
+{
+  "account_login": 12345678,
+  "acknowledged_risk": true,
+  "armed_at": "2026-01-01T00:00:00Z",
+  "note": "Copy to config/live_arming.json and set your real account number. This file is gitignored."
+}
