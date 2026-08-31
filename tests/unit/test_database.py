@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from xauusd.database.repositories import Repositories
 from xauusd.database.session import Database
@@ -202,7 +203,9 @@ class TestOrderIdempotency:
             Repositories(s).orders.create_intent(
                 "tag123", 1, "XAUUSD", Direction.LONG, 0.1, 2000, 1990, 2020
             )
-        with pytest.raises(Exception), db.session() as s:
+        # The unique constraint on client_tag is what makes order sends idempotent,
+        # so assert on IntegrityError rather than on any exception at all.
+        with pytest.raises(IntegrityError), db.session() as s:
             Repositories(s).orders.create_intent(
                 "tag123", 1, "XAUUSD", Direction.LONG, 0.1, 2000, 1990, 2020
             )

@@ -6,6 +6,7 @@ These are tested against synthetic data with PLANTED geometry, so a test can ass
 
 from __future__ import annotations
 
+import itertools
 from datetime import UTC, datetime
 
 import pytest
@@ -67,7 +68,7 @@ class TestSwingDetection:
         s = trend(200, drift=0.5)
         swings = detect_swings(s, 2)
         kinds = [w.kind for w in swings]
-        assert all(a is not b for a, b in zip(kinds, kinds[1:])), "swings must alternate"
+        assert all(a is not b for a, b in itertools.pairwise(kinds)), "swings must alternate"
 
 
 class TestStructureEvents:

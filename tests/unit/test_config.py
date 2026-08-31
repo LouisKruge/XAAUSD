@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from xauusd.config.settings import (
     RiskConfig,
@@ -31,7 +32,9 @@ class TestRiskConfig:
         ],
     )
     def test_rejects_unsafe(self, kwargs: dict) -> None:
-        with pytest.raises(Exception):
+        # ValidationError specifically: a blind `Exception` would also pass on a
+        # typo'd keyword, which is the failure mode this test exists to rule out.
+        with pytest.raises(ValidationError):
             RiskConfig(**kwargs)
 
     def test_defaults_match_the_specification(self) -> None:
@@ -45,13 +48,13 @@ class TestRiskConfig:
 
     def test_is_immutable(self) -> None:
         r = RiskConfig()
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             r.risk_pct_a = 0.10  # type: ignore[misc]
 
 
 class TestScoringWeights:
     def test_must_total_100(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             ScoringWeights(htf_bias=20.0)
         assert sum(ScoringWeights().category_maximums().values()) == pytest.approx(100.0)
 
@@ -67,15 +70,15 @@ class TestThresholds:
         ],
     )
     def test_rejects_incoherent(self, kwargs: dict) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             StrategyThresholds(**kwargs)
 
 
 class TestSettings:
     def test_live_requires_both_mode_and_flag(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             Settings(live_trading=True)  # flag without mode
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             Settings(mode=Mode.LIVE)  # mode without flag
         s = Settings(mode=Mode.LIVE, live_trading=True)
         assert s.mode is Mode.LIVE

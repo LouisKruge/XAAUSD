@@ -118,7 +118,7 @@ class TestParity:
                 f"decision COUNT differs at {now}: live {len(live.decisions)} "
                 f"vs backtest {len(expected)}"
             )
-            for a, b in zip(live.decisions, expected):
+            for a, b in zip(live.decisions, expected, strict=True):
                 assert a.classification == b.classification, (
                     f"classification differs at {now}: {a.classification} vs {b.classification}"
                 )

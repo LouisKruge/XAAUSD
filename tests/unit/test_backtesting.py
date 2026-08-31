@@ -84,6 +84,17 @@ class TestMetrics:
         assert m.profit_factor == pytest.approx(3.0)
         assert m.win_rate == pytest.approx(0.6)
 
+    def test_a_single_trade_does_not_compute_a_nan_standard_deviation(self) -> None:
+        """One trade has no dispersion. std(ddof=1) on it divides by zero, so the
+        length guard must come FIRST — otherwise nan leaks into Sharpe and Sortino."""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            m = compute([trade(2.0, 0)])
+        assert m.trades == 1
+        assert m.sharpe == 0.0 and m.sortino == 0.0
+
     def test_drawdown_from_the_equity_curve(self) -> None:
         assert max_drawdown([100, 120, 90, 110])[0] == pytest.approx(0.25)
 
