@@ -29,6 +29,9 @@ class FakeBridge:
         # Failure injection
         self.hang_methods: set[str] = set()  # never respond (client-side timeout)
         self.drop_methods: set[str] = set()  # close the socket mid-call
+        # Side effect applied just before dropping — models the realistic and most
+        # dangerous case: the order DID reach the server, but the response never came.
+        self.on_drop: dict[str, Callable[[dict[str, Any]], None]] = {}
         self.error_methods: dict[str, str] = {}  # respond with an error
 
         self.positions: list[dict[str, Any]] = []
@@ -69,6 +72,9 @@ class FakeBridge:
                     bridge.calls.append((method, params))
 
                     if method in bridge.drop_methods:
+                        effect = bridge.on_drop.get(method)
+                        if effect is not None:
+                            effect(params)
                         sock.close()
                         return
                     if method in bridge.hang_methods:
