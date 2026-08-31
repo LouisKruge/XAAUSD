@@ -16,7 +16,7 @@ underwater at the 5th percentile, it is not deployable regardless of its mean.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
@@ -44,7 +44,9 @@ class MonteCarloResult:
     kind: str = "shuffle"
 
     def as_dict(self) -> dict[str, Any]:
-        return {k: (round(v, 6) if isinstance(v, float) else v) for k, v in self.__dict__.items()}
+        # asdict, not __dict__: this is a slots dataclass and has no __dict__, which
+        # crashed JSON export of a validation report.
+        return {k: (round(v, 6) if isinstance(v, float) else v) for k, v in asdict(self).items()}
 
 
 def _simulate_equity(r_multiples: Sequence[float], starting: float, risk_pct: float) -> np.ndarray:

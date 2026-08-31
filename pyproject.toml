@@ -64,5 +64,14 @@ pythonpath = ["src"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
 
+[tool.coverage.run]
+omit = [
+    # Windows-only: imports MetaTrader5 and requires a running terminal, so it cannot
+    # execute on Linux or in CI at all. Its behaviour is covered from the client side
+    # by the fake-bridge contract tests in tests/unit/test_execution_contract.py, which
+    # exercise the real wire protocol over a real socket.
+    "*/execution/mt5_bridge.py",
+]
+
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]

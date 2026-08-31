@@ -361,3 +361,28 @@ class TestPlannedRRIsCarried:
         m = compute(trades)
         assert m.avg_rr_planned == pytest.approx(3.0)
         assert m.avg_rr_travelled == pytest.approx(2.0)
+
+
+class TestResultSerialisation:
+    """Regression: MonteCarloResult.as_dict used self.__dict__ on a slots dataclass,
+    which crashed JSON export of a validation report — after the whole suite had run."""
+
+    def test_monte_carlo_result_serialises(self) -> None:
+        trades = [trade(2.0 if i % 3 else -1.0, i) for i in range(60)]
+        for kind in ("shuffle", "bootstrap", "random_start"):
+            d = monte_carlo.run(trades, simulations=100, kind=kind).as_dict()
+            assert d["kind"] == kind
+            assert "final_equity_p5" in d
+            import json
+
+            json.dumps(d)  # must be JSON-serialisable, not merely a dict
+
+    def test_every_result_type_survives_json(self) -> None:
+        """A validation report that computes for an hour and then fails to serialise is
+        the worst possible failure mode."""
+        import json
+
+        trades = [trade(2.0 if i % 3 else -1.0, i) for i in range(60)]
+        m = compute(trades)
+        json.dumps(m.as_dict())
+        json.dumps({k: v.as_dict() for k, v in monte_carlo.run_all(trades, 100).items()})
