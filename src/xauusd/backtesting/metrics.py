@@ -215,10 +215,23 @@ def compute(
             len(trades) / (period_days / 365.25) if period_days and period_days > 0 else len(trades)
         )
         m.sharpe = float(per_trade * math.sqrt(max(trades_per_year, 1.0)))
-        downside = rs[rs < 0]
-        dstd = downside.std(ddof=1) if downside.size > 1 else 0.0
+
+        # Sortino uses the TEXTBOOK downside deviation — the root-mean-square of
+        # min(r - target, 0) over ALL trades — not the standard deviation of the
+        # losing subset.
+        #
+        # This distinction is critical for a fixed-stop system, not academic. Every
+        # loss is approximately -1R by construction, so the losing subset has almost
+        # no dispersion: on a real 12-trade sample here, std(losses) = 0.005 gives a
+        # Sortino of 182, while the correct downside deviation of 0.662 gives 1.51.
+        # The deployment gate requires Sortino >= 2.0, so the wrong formula would wave
+        # through a strategy the right one blocks.
+        downside = np.minimum(rs - 0.0, 0.0)
+        downside_deviation = float(np.sqrt(np.mean(downside**2)))
         m.sortino = (
-            float(rs.mean() / dstd * math.sqrt(max(trades_per_year, 1.0))) if dstd > 0 else 0.0
+            float(rs.mean() / downside_deviation * math.sqrt(max(trades_per_year, 1.0)))
+            if downside_deviation > 1e-9
+            else 0.0
         )
 
     total_return = (curve[-1] / starting_equity - 1.0) if curve else 0.0

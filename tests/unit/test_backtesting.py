@@ -313,3 +313,51 @@ class TestDeploymentGate:
         r = DeploymentGate().evaluate("s", "1.0", self._strong_oos(), **self._full_evidence())
         text = r.render()
         assert "VALIDATION REPORT" in text and "win_rate_observed" in text
+
+
+class TestSortinoFormula:
+    """Regression: Sortino used the standard deviation of the LOSING SUBSET rather than
+    the textbook downside deviation.
+
+    For a fixed-stop system this is not a rounding difference. Every loss is about -1R
+    by construction, so the losing subset has almost no dispersion and the ratio
+    explodes — a real 12-trade sample produced 700 where the correct value is 5.2. The
+    deployment gate requires Sortino >= 2.0, so the wrong formula would wave through
+    strategies the right one blocks.
+    """
+
+    RS = [3.30, -1.02, -1.03, 2.08, 2.52, 2.22, 2.48, -1.03, -1.02, 2.1, -1.03, 2.4]
+
+    def _metrics(self, rs: list[float]) -> Metrics:
+        return compute([trade(r, i) for i, r in enumerate(rs)], period_days=365)
+
+    def test_identical_losses_do_not_explode_the_ratio(self) -> None:
+        m = self._metrics(self.RS)
+        assert 0 < m.sortino < 20, f"Sortino {m.sortino} is not a plausible value"
+
+    def test_downside_deviation_uses_all_trades_not_just_losers(self) -> None:
+        """The denominator must be rms(min(r, 0)) over every trade."""
+        rs = np.array(self.RS)
+        expected_dd = float(np.sqrt(np.mean(np.minimum(rs, 0.0) ** 2)))
+        m = self._metrics(self.RS)
+        implied = rs.mean() / (m.sortino / np.sqrt(len(rs))) if m.sortino else 0.0
+        assert implied == pytest.approx(expected_dd, rel=0.02)
+
+    def test_a_system_with_no_losses_does_not_divide_by_zero(self) -> None:
+        m = self._metrics([2.0] * 10)
+        assert m.sortino == 0.0
+
+    def test_worse_downside_lowers_sortino(self) -> None:
+        mild = self._metrics([2.0, -0.5] * 10)
+        harsh = self._metrics([2.0, -3.0] * 10)
+        assert harsh.sortino < mild.sortino
+
+
+class TestPlannedRRIsCarried:
+    def test_planned_rr_reaches_the_metrics(self) -> None:
+        trades = [trade(2.0, i) for i in range(5)]
+        for t in trades:
+            object.__setattr__(t, "planned_rr_at_entry", 3.0)
+        m = compute(trades)
+        assert m.avg_rr_planned == pytest.approx(3.0)
+        assert m.avg_rr_travelled == pytest.approx(2.0)

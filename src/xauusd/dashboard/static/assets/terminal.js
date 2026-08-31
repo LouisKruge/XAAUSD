@@ -490,28 +490,58 @@ function switchTab(name) {
   if (name === 'rejections') refreshRejections();
 }
 
+/** Show a failure in the panel rather than leaving it blank.
+ *
+ * An empty panel is indistinguishable from "no data", which on a trading dashboard is
+ * the difference between "the bot is being selective" and "the bot is broken". Every
+ * refresh reports its own failure where the operator will see it.
+ */
+function panelError(selector, err) {
+  const el = $(selector);
+  if (el) {
+    el.innerHTML = `<div class="empty" style="color:var(--short)">` +
+      `Failed to load: ${String(err && err.message ? err.message : err)}</div>`;
+  }
+  console.error(selector, err);
+}
+
 async function refreshState() {
   try {
     state.data = await api('/api/state');
     renderCommandCentre();
     renderIntelligence();
     setConnected(true);
-  } catch (e) { setConnected(false); }
+  } catch (e) {
+    setConnected(false);
+    panelError('#candidate', e);
+  }
 }
 
 async function refreshDecisions() {
-  try { state.decisions = await api('/api/decisions?limit=200'); renderDecisions(); }
-  catch (e) { /* keep the last view rather than blanking the screen */ }
+  try {
+    state.decisions = await api('/api/decisions?limit=200');
+    renderDecisions();
+  } catch (e) {
+    panelError('#decisions-body', e);
+  }
 }
 
 async function refreshPerformance() {
-  try { state.performance = await api('/api/performance?days=365'); renderPerformance(); }
-  catch (e) { /* ignore */ }
+  try {
+    state.performance = await api('/api/performance?days=365');
+    renderPerformance();
+  } catch (e) {
+    panelError('#perf-tiles', e);
+  }
 }
 
 async function refreshRejections() {
-  try { state.rejections = await api('/api/rejections?hours=24'); renderRejections(); }
-  catch (e) { /* ignore */ }
+  try {
+    state.rejections = await api('/api/rejections?hours=24');
+    renderRejections();
+  } catch (e) {
+    panelError('#ledger', e);
+  }
 }
 
 function setConnected(ok) {

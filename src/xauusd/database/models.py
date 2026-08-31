@@ -345,6 +345,7 @@ class PositionRow(Base):
     remaining_volume: Mapped[float] = mapped_column(Float)
     risk_money: Mapped[float] = mapped_column(Money)
     risk_pct: Mapped[float] = mapped_column(Float)
+    planned_rr: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_price: Mapped[float | None] = mapped_column(Price, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(24), nullable=True)
     gross_pnl: Mapped[float | None] = mapped_column(Money, nullable=True)
