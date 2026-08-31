@@ -146,3 +146,61 @@ def with_gap(
             spread_points=b.spread_points,
         )
     return BarSeries.from_bars(tf, bars)
+
+
+def market(
+    n_m5: int = 6000,
+    start_price: float = 2400.0,
+    drift_per_bar: float = 0.02,
+    noise: float = 0.55,
+    seed: int = 17,
+    start: datetime | None = None,
+) -> dict[Timeframe, BarSeries]:
+    """A CONSISTENT multi-timeframe market, derived from one M5 path.
+
+    Generating each timeframe independently (the obvious shortcut) produces an H4 bias
+    that contradicts the M5 bars being traded, which makes every downstream number
+    meaningless. So: build M5 once, aggregate upward.
+    """
+    from xauusd.data.resample import build_timeframes
+
+    rng = np.random.RandomState(seed)
+    t0 = start or datetime(2026, 1, 4, 22, 0, tzinfo=UTC)
+
+    # Intraday seasonality: London/NY hours move more than the Asian session.
+    steps = np.arange(n_m5)
+    hour = ((t0.hour * 3600 + steps * 300) // 3600) % 24
+    activity = np.where((hour >= 7) & (hour < 21), 1.0, 0.45)
+
+    rets = drift_per_bar + rng.randn(n_m5) * noise * activity
+    closes = start_price + np.cumsum(rets)
+
+    bars = []
+    prev = start_price
+    for i, c in enumerate(closes):
+        o = prev
+        wick = abs(rng.randn()) * noise * activity[i] * 1.6
+        hi = max(o, c) + wick
+        lo = min(o, c) - abs(rng.randn()) * noise * activity[i] * 1.6
+        ts = t0 + timedelta(minutes=5 * i)
+        # Skip the weekend: gold does not trade Saturday.
+        if ts.weekday() == 5 or (ts.weekday() == 6 and ts.hour < 22):
+            prev = float(c)
+            continue
+        bars.append(
+            Bar(
+                ts,
+                float(o),
+                float(hi),
+                float(lo),
+                float(c),
+                tick_volume=int(80 * activity[i] + rng.randint(0, 40)),
+                spread_points=int(20 + (1 - activity[i]) * 25),
+            )
+        )
+        prev = float(c)
+
+    m5 = BarSeries.from_bars(Timeframe.M5, bars)
+    return build_timeframes(
+        m5, [Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1, Timeframe.W1]
+    )
