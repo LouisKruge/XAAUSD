@@ -1,5 +1,10 @@
 # 05 — Implementation Roadmap
 
+> **STATUS: Phases 1–12 are built and tested.** Phases 13–14 are wall-clock work that
+> cannot be compressed — a month of paper and demo trading is a month, not a sprint.
+> The acceptance gate for each phase below records what was actually verified.
+
+
 Fourteen phases. Each has a concrete deliverable and an **acceptance gate**; a phase is not
 "done" because code exists, but because its gate passes. Phases 1–4 are foundation work with no
 trading logic at all, which is deliberate: the value of this system is the trustworthiness of its
@@ -249,3 +254,38 @@ in code rather than trusting configuration discipline.
   teaches more than four half-built ones, and the second is then fast.
 - **The dashboard could move earlier** if you want visibility during Phase 5–8 development; a
   minimal read-only version after Phase 7 is a reasonable trade. Say the word and I will resequence.
+
+
+---
+
+## Status against each gate
+
+| Phase | State | Gate evidence |
+|---|---|---|
+| 1 Skeleton, config, DB, logging | **done** | 27-table schema builds via Alembic on Postgres and SQLite; invalid risk config rejected at startup; secrets redacted from logs |
+| 2 MT5 bridge & broker abstraction | **done** | Symbol auto-discovery across six broker layouts; refuses on ambiguity; every mapped return code covered by fake-bridge contract tests on a real socket |
+| 3 Ingestion & MarketView | **done** | Property test proves no bar with `close > now` is ever returned; resampling exact and anchored to gold's 22:00 UTC roll |
+| 4 Sessions, volatility, regimes | **done** | DST verified across both 2026 transitions and the UK/US disagreement week; ABNORMAL overrides any trend label |
+| 5 Core price-action engines | **done** | Written to `docs/specs/`; swings carry confirmation lag; planted-geometry fixtures assert detection |
+| 6 Fundamental, macro & news | **done** | Point-in-time reconstruction verified; every feed fails closed; calendar relay EA + layered provider chain |
+| 7 Backtesting engine | **done** | Parity test in CI: same bar, same decision via both paths; deterministic; costs verifiably bite |
+| 8 Setup detection, scoring, classification | **done** | Every NO_TRADE has an attributable blocking gate; no trade below 1:2 after normalisation |
+| 9 Risk engine & kill switch | **done** | Property test across randomised specs; every "NEVER ALLOWED" behaviour has a test asserting impossibility |
+| 10 Validation & deployment gate | **built, not passed** | Suite runs end to end and correctly FAILS on data with no edge. **No strategy has passed. That is expected.** |
+| 11 Execution & position management | **done** | Chaos suite: ambiguous sends never resent, recovered by tag, unresolvable state halts trading |
+| 12 Dashboard | **done** | Five tabs verified by screenshot against seeded data, zero JS errors |
+| 13 Paper → demo | **not started** | Requires ≥4 weeks wall clock and a broker account |
+| 14 Small live → scaling | **not started** | Requires Phase 13 and a passed Phase 10 gate |
+
+### What Phase 10 actually needs next
+
+The engine, the gate and the report are all built and working. What is missing is
+**data and iteration**, not code:
+
+1. Harvest real XAUUSD history (broker M1 + Dukascopy) — the current runs use synthetic
+   data, which is a smoke test of the machinery and nothing more.
+2. Run the gate against it. Expect failure.
+3. Iterate toward **more selectivity**, not more signals. The productive levers are
+   narrowing the session window, raising the required sweep quality, and demanding HTF
+   alignment rather than mere non-conflict.
+4. Only then does Phase 13 begin.
