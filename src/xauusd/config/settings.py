@@ -326,6 +326,14 @@ class NewsConfig(BaseModel):
     )
     llm_enabled: bool = False
     llm_model: str = "claude-sonnet-5"
+    calendar_file: str | None = Field(
+        None,
+        description=(
+            "Path to the file written by the MQL5 calendar relay EA (see mql5/). "
+            "This is the preferred primary calendar source: free, already installed, "
+            "and on the broker's own clock."
+        ),
+    )
 
 
 class DataConfig(BaseModel):

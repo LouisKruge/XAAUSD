@@ -11,7 +11,9 @@ degrading.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
 from xauusd.intelligence.economic_calendar import (
@@ -80,6 +82,64 @@ class BridgeCalendarProvider:
                 )
             )
         return sorted(out, key=lambda e: e.ts)
+
+
+class TerminalFileCalendarProvider:
+    """Reads the file written by the MQL5 calendar relay EA (see mql5/).
+
+    This is the PRIMARY calendar source: free, already installed, and on the broker's
+    own clock. The Python MetaTrader5 package does not expose the calendar on every
+    build, but MQL5 always does.
+    """
+
+    name = "mt5_terminal_file"
+
+    def __init__(self, path: str, max_age_hours: float = 6.0) -> None:
+        self.path = Path(path)
+        self.max_age_hours = max_age_hours
+
+    def events(self, start: datetime, end: datetime) -> list[CalendarEvent]:
+        if not self.path.exists():
+            return []
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("calendar_file_unreadable", path=str(self.path), error=str(exc))
+            return []
+
+        generated = datetime.fromtimestamp(float(data.get("generated_at", 0)), UTC)
+        age_h = (datetime.now(UTC) - generated).total_seconds() / 3600.0
+        if age_h > self.max_age_hours:
+            # A stale file is worse than no file: it would silently mask new events.
+            log.warning(
+                "calendar_file_stale",
+                path=str(self.path),
+                age_hours=round(age_h, 1),
+                detail="the relay EA may have stopped; falling through to the next provider",
+            )
+            return []
+
+        out: list[CalendarEvent] = []
+        for row in data.get("events", []):
+            name = str(row.get("name", ""))
+            currency = str(row.get("currency", ""))
+            if not name:
+                continue
+            impact, relevance, key = classify_event(name, currency)
+            out.append(
+                CalendarEvent(
+                    ts=datetime.fromtimestamp(float(row["time"]), UTC),
+                    name=name,
+                    currency=currency,
+                    impact=impact,
+                    gold_relevance=relevance,
+                    normalized_key=key,
+                    actual=row.get("actual"),
+                    forecast=row.get("forecast"),
+                    previous=row.get("previous"),
+                )
+            )
+        return [e for e in sorted(out, key=lambda e: e.ts) if start <= e.ts <= end]
 
 
 class RepositoryCalendarProvider:
@@ -161,6 +221,28 @@ class LayeredCalendarProvider:
                 return evs
         self.last_source = "none"
         return []
+
+
+def build_default_chain(
+    broker: object | None = None,
+    terminal_file: str | None = None,
+    repo: object | None = None,
+    as_of: datetime | None = None,
+) -> LayeredCalendarProvider:
+    """The provider chain from docs/architecture/04-data-sources.md section 5.
+
+    Order matters: the terminal's own calendar first (free, broker clock), then
+    anything already persisted, then the curated schedule which never fails.
+    """
+    providers: list[CalendarProvider] = []
+    if terminal_file:
+        providers.append(TerminalFileCalendarProvider(terminal_file))
+    if broker is not None:
+        providers.append(BridgeCalendarProvider(broker))
+    if repo is not None:
+        providers.append(RepositoryCalendarProvider(repo, as_of))
+    providers.append(FallbackCalendarProvider())
+    return LayeredCalendarProvider(providers)
 
 
 def mask_future_actuals(events: list[CalendarEvent], as_of: datetime) -> list[CalendarEvent]:

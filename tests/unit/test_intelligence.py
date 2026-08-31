@@ -329,3 +329,90 @@ class TestFeedParsing:
 
     def test_malformed_feed_yields_nothing_rather_than_raising(self) -> None:
         assert parse_feed("<not xml", "test") == []
+
+
+class TestTerminalCalendarRelay:
+    """The MQL5 relay file is the PRIMARY calendar source — free, already installed,
+    and on the broker's own clock."""
+
+    def _write(self, tmp_path, generated_at: float, events: list) -> str:  # type: ignore[no-untyped-def]
+        import json
+
+        f = tmp_path / "cal.json"
+        f.write_text(json.dumps({"generated_at": generated_at, "events": events}))
+        return str(f)
+
+    def _event(self, offset_s: float, name: str, currency: str = "USD", **kw):  # type: ignore[no-untyped-def]
+        import time
+
+        base = {
+            "event_id": 1,
+            "time": time.time() + offset_s,
+            "name": name,
+            "currency": currency,
+            "importance": 3,
+            "actual": None,
+            "forecast": None,
+            "previous": None,
+        }
+        base.update(kw)
+        return base
+
+    def test_reads_and_classifies_relayed_events(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        import time
+
+        from xauusd.data.providers.calendar_feed import build_default_chain
+
+        path = self._write(
+            tmp_path,
+            time.time(),
+            [
+                self._event(3600, "Non-Farm Payrolls"),
+                self._event(7200, "German Consumer Confidence", "EUR"),
+            ],
+        )
+        chain = build_default_chain(terminal_file=path)
+        evs = chain.events(datetime.now(UTC), datetime.now(UTC) + timedelta(hours=6))
+        assert chain.last_source == "mt5_terminal_file"
+        nfp = next(e for e in evs if "Payrolls" in e.name)
+        assert nfp.impact is EventImpact.CRITICAL and nfp.gold_relevance >= 9
+
+    def test_a_stale_relay_file_falls_through_rather_than_masking_events(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """A stale file is worse than no file: it would silently hide new events."""
+        import time
+
+        from xauusd.data.providers.calendar_feed import build_default_chain
+
+        path = self._write(tmp_path, time.time() - 86400, [])
+        chain = build_default_chain(terminal_file=path)
+        chain.events(datetime.now(UTC), datetime.now(UTC) + timedelta(days=10))
+        assert chain.last_source == "curated_fallback"
+
+    def test_a_missing_file_falls_through(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        from xauusd.data.providers.calendar_feed import build_default_chain
+
+        chain = build_default_chain(terminal_file=str(tmp_path / "nope.json"))
+        chain.events(datetime.now(UTC), datetime.now(UTC) + timedelta(days=10))
+        assert chain.last_source == "curated_fallback"
+
+    def test_a_corrupt_file_falls_through(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        from xauusd.data.providers.calendar_feed import build_default_chain
+
+        f = tmp_path / "cal.json"
+        f.write_text("{not json")
+        chain = build_default_chain(terminal_file=str(f))
+        chain.events(datetime.now(UTC), datetime.now(UTC) + timedelta(days=10))
+        assert chain.last_source == "curated_fallback"
+
+    def test_unreleased_actuals_stay_none(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """The EA emits null rather than a sentinel; a sentinel read as a real value
+        would be a direct route to a look-ahead bug."""
+        import time
+
+        from xauusd.data.providers.calendar_feed import build_default_chain
+
+        path = self._write(tmp_path, time.time(), [self._event(3600, "US CPI", forecast=3.1)])
+        chain = build_default_chain(terminal_file=path)
+        evs = chain.events(datetime.now(UTC), datetime.now(UTC) + timedelta(hours=6))
+        assert evs[0].actual is None
+        assert evs[0].forecast == 3.1
