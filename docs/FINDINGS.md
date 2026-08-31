@@ -140,3 +140,42 @@ Every dashboard refresh had `catch (e) { /* ignore */ }`. A failed fetch produce
 empty panel, which is indistinguishable from "no data" — on a trading dashboard, the
 difference between "the bot is being selective" and "the bot is broken". Failures now
 render in the panel where the operator will see them.
+
+
+---
+
+## 12. A test that bypassed the gates it was meant to exercise
+
+The trade-path integration test passed `gates_passed=True` into the classifier so it
+could focus on scoring. That silently stopped checking every requirement enforced by a
+**gate** rather than by the classifier — premium/discount location among them.
+
+It surfaced only because a deliberately-weakened case (a long in premium) was still
+classified `A`. The classifier is right not to duplicate the gate; the test was wrong to
+stub it. It now runs `run_gates` for real.
+
+**Class of bug:** a test helper that simplifies away the exact composition it is
+supposed to be testing. Worth asking of any test fixture: which real component did I
+replace with `True`?
+
+---
+
+## 13. Generating data and hoping it contains a setup
+
+The original version of that test generated a random walk and asserted at least one
+A-grade trade appeared. It failed repeatedly — not because the decision path was broken,
+but because a random walk rarely contains the full confluence chain, which is the whole
+point of the system.
+
+Three attempts to hand-plant a setup were each *correctly* rejected: the first because a
+14-point 5-minute displacement is roughly 15 ATR and the regime engine classified the
+market ABNORMAL; the second because the retrace landed in premium; the third because the
+deep pullback made H1 read bearish, conflicting with a long.
+
+That difficulty is itself informative — it is a fair proxy for how rare a genuine A setup
+is meant to be. The fix was to stop conflating two questions:
+
+- *Does the decision path turn a valid setup into a sized trade?* → construct the
+  snapshot directly. Fast, deterministic, and it tests the actual claim.
+- *Does real market data contain such setups?* → the backtester answers this, and its
+  answer was 5 trades from 24,064 evaluations over 11 months.

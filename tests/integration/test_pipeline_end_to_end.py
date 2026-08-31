@@ -175,87 +175,12 @@ class TestSelectivity:
         assert all(d.features for d in no_candidate)
 
 
-class TestTradePathFires:
-    """The positive path must work, or the system is only pretending to be selective."""
-
-    @pytest.fixture(scope="class")
-    def permissive(self) -> Settings:
-        # Thresholds calibrated for the Phase 10 validation run are not yet known, so
-        # this exercises the machinery at a threshold a candidate can actually reach.
-        # It does NOT relax any hard gate, risk limit or the 1:2 RR floor.
-        return Settings(
-            enabled_strategies=[
-                "sweep_mss_fvg",
-                "sweep_mss_ob",
-                "session_range_expansion",
-                "pdh_pdl_reversion",
-            ],
-            thresholds=StrategyThresholds(
-                a_score_min=35.0,
-                a_plus_score_min=60.0,
-                a_probability_min=0.5,
-                a_plus_probability_min=0.6,
-                a_strong_categories_min=2,
-                a_plus_strong_categories_min=6,
-                min_rr=2.0,
-                preferred_rr=3.0,
-            ),
-        )
-
-    @pytest.fixture(scope="class")
-    def trades(self, source, m5, permissive):  # type: ignore[no-untyped-def]
-        results = run_window(
-            source,
-            m5,
-            permissive,
-            supportive_macro(Direction.LONG),
-            calm_news(),
-            3000,
-            6000,
-            step=3,
-        )
-        return [d for r in results for d in r.decisions if d.is_trade]
-
-    def test_at_least_one_trade_is_produced(self, trades) -> None:  # type: ignore[no-untyped-def]
-        assert trades, "the pipeline never produced an executable decision"
-
-    def test_every_trade_clears_the_rr_floor(self, trades) -> None:  # type: ignore[no-untyped-def]
-        """The 1:2 floor is never waived, at any threshold setting."""
-        assert all(d.plan.rr >= 2.0 for d in trades)
-
-    def test_every_trade_is_sized_within_its_class_cap(self, trades) -> None:  # type: ignore[no-untyped-def]
-        for d in trades:
-            assert d.sizing is not None and d.sizing.approved
-            cap = 0.02 if d.classification is Classification.A_PLUS else 0.01
-            assert d.sizing.risk_pct <= cap + 1e-9, (
-                f"{d.classification} sized at {d.sizing.risk_pct:.4%}, cap {cap:.2%}"
-            )
-            assert d.sizing.lots >= 0.01
-
-    def test_every_trade_has_a_complete_audit_trail(self, trades) -> None:  # type: ignore[no-untyped-def]
-        for d in trades:
-            assert d.gates and all(g.passed for g in d.gates)
-            assert d.breakdown is not None and d.score is not None
-            assert d.features and len(d.features) > 50
-            assert d.reasons_for
-            assert d.plan.invalidation
-            assert d.config_hash
-            text = d.explain()
-            assert "All gates passed" in text and str(d.classification) in text
-
-    def test_stop_is_on_the_correct_side_and_structural(self, trades) -> None:  # type: ignore[no-untyped-def]
-        for d in trades:
-            p = d.plan
-            if p.direction is Direction.LONG:
-                assert p.stop_loss < p.entry < p.final_target.price
-            else:
-                assert p.stop_loss > p.entry > p.final_target.price
-
-    def test_targets_cite_real_structure(self, trades) -> None:  # type: ignore[no-untyped-def]
-        """A target must name what it is anchored to, never be a bare multiple of R."""
-        for d in trades:
-            for t in d.plan.targets:
-                assert t.rationale and t.rationale != ""
+# The positive path — that a valid setup becomes a sized, executable trade — is tested
+# in test_trade_path.py, which constructs the snapshot directly. An earlier version
+# lived here and generated price data hoping it contained an A-grade setup; whether a
+# random walk happens to produce one is not a property of this system, so the test
+# failed for reasons unrelated to the decision path. Whether REAL data contains such
+# setups is answered by the backtester.
 
 
 class TestHardLimitsHoldUnderPermissiveThresholds:
