@@ -9,8 +9,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from tests.fixtures.synthetic import make_bars, market, ranging, sweep_and_reverse, trend
 
+from tests.fixtures.synthetic import make_bars, market, ranging, sweep_and_reverse, trend
 from xauusd.core.fair_value_gap import FVGEngine
 from xauusd.core.indicators import atr_last
 from xauusd.core.liquidity import LiquidityEngine

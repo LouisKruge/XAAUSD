@@ -610,6 +610,7 @@ class TradePlan:
     invalidation: str
     entry_zone_top: float | None = None
     entry_zone_bottom: float | None = None
+    symbol: str = ""
     evidence: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -619,6 +620,9 @@ class TradePlan:
             raise ValueError("short stop must be above entry")
         if not self.targets:
             raise ValueError("a trade plan must have at least one target")
+
+    def symbol_hint(self) -> str:
+        return self.symbol
 
     @property
     def risk_distance(self) -> float:

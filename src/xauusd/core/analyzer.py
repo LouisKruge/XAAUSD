@@ -219,6 +219,39 @@ class MarketAnalyzer:
             session_low=s_low,
         )
 
+    def _compute_zones(
+        self,
+        view: MarketView,
+        setup_series: BarSeries,
+        atr_setup: float,
+        h1: BarSeries,
+        d1: BarSeries,
+        w1: BarSeries,
+    ) -> tuple[list, list, list, list]:
+        """All zone analysis for one setup bar. Cached by the caller."""
+        s = self.settings
+        swings = detect_swings(
+            setup_series, s.structure.swing_lookback, s.structure.swing_min_atr, atr_setup
+        )
+        asia = self.asia_range(view)
+        pools, sweeps = self.liquidity.analyze(setup_series, swings, d1, w1, asia)
+        fvgs = self.fvg.detect(setup_series, atr_setup)
+        events = self.structure.detect_events(setup_series, swings, atr_setup)
+        obs = self.order_blocks.detect(setup_series, events, atr_setup, fvgs)
+        obs += self.order_blocks.detect_breakers(setup_series, obs)
+
+        # H1 zones as well: higher-timeframe FVGs and order blocks carry more weight.
+        if len(h1) > 60:
+            atr_h1 = atr_last(h1, 14)
+            if np.isfinite(atr_h1) and atr_h1 > 0:
+                fvgs += self.fvg.detect(h1, atr_h1)
+                h1_swings = detect_swings(
+                    h1, s.structure.swing_lookback, s.structure.swing_min_atr, atr_h1
+                )
+                h1_events = self.structure.detect_events(h1, h1_swings, atr_h1)
+                obs += self.order_blocks.detect(h1, h1_events, atr_h1, fvgs)
+        return pools, sweeps, fvgs, obs
+
     # -- top level ---------------------------------------------------------------------
 
     def analyze(
@@ -249,27 +282,16 @@ class MarketAnalyzer:
         obs: list[OrderBlock] = []
 
         if len(setup_series) > 40 and np.isfinite(atr_setup) and atr_setup > 0:
-            swings = detect_swings(
-                setup_series, s.structure.swing_lookback, s.structure.swing_min_atr, atr_setup
+            # Zones derive from the SETUP timeframe, which changes only when a setup
+            # bar closes. Caching on that bar means the three M5 evaluations inside one
+            # M15 bar do the work once, not three times.
+            pools, sweeps, fvgs, obs = self._cached(
+                "zones",
+                setup_series,
+                lambda: self._compute_zones(view, setup_series, atr_setup, h1, d1, w1),
             )
-            asia = self.asia_range(view)
-            pools, sweeps = self.liquidity.analyze(setup_series, swings, d1, w1, asia)
-            fvgs = self.fvg.detect(setup_series, atr_setup)
-            events = self.structure.detect_events(setup_series, swings, atr_setup)
-            obs = self.order_blocks.detect(setup_series, events, atr_setup, fvgs)
-            obs += self.order_blocks.detect_breakers(setup_series, obs)
 
-            # H1 zones too: higher-timeframe FVGs and OBs carry more weight.
-            if len(h1) > 60:
-                atr_h1 = atr_last(h1, 14)
-                if np.isfinite(atr_h1) and atr_h1 > 0:
-                    fvgs += self.fvg.detect(h1, atr_h1)
-                    h1_swings = detect_swings(
-                        h1, s.structure.swing_lookback, s.structure.swing_min_atr, atr_h1
-                    )
-                    h1_events = self.structure.detect_events(h1, h1_swings, atr_h1)
-                    obs += self.order_blocks.detect(h1, h1_events, atr_h1, fvgs)
-
+        price_now = view.price()
         price_now = view.price()
         if np.isfinite(atr_setup) and atr_setup > 0:
             pools = self._prune_pools(pools, price_now, atr_setup)

@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from tests.fixtures.synthetic import ranging, trend
-
 from xauusd.core.regime import RegimeEngine
 from xauusd.core.sessions import LONDON, NEW_YORK, BrokerClock, SessionEngine
 from xauusd.data.series import BarSeries

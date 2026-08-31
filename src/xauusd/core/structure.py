@@ -52,30 +52,45 @@ def detect_swings(
     if n < 2 * lookback + 1:
         return out
 
-    high, low = series.high, series.low
-    for i in range(lookback, n - lookback):
-        left = slice(i - lookback, i)
-        right = slice(i + 1, i + 1 + lookback)
-        if np.all(high[i] > high[left]) and np.all(high[i] >= high[right]):
-            out.append(
-                RawSwing(
-                    i,
-                    i + lookback,
-                    float(high[i]),
-                    SwingKind.HIGH,
-                    datetime.fromtimestamp(int(series.ts[i]), UTC),
-                )
+    # Vectorised fractal detection. The naive per-bar loop with np.all was the single
+    # largest cost in the decision cycle; sliding windows give identical results.
+    win = 2 * lookback + 1
+    high_w = np.lib.stride_tricks.sliding_window_view(series.high, win)
+    low_w = np.lib.stride_tricks.sliding_window_view(series.low, win)
+    centre_h = high_w[:, lookback]
+    centre_l = low_w[:, lookback]
+    is_high = (centre_h > high_w[:, :lookback].max(axis=1)) & (
+        centre_h >= high_w[:, lookback + 1 :].max(axis=1)
+    )
+    is_low = (centre_l < low_w[:, :lookback].min(axis=1)) & (
+        centre_l <= low_w[:, lookback + 1 :].min(axis=1)
+    )
+    # A bar cannot be both; highs take precedence, matching the original ordering.
+    is_low &= ~is_high
+
+    ts = series.ts
+    for idx in np.flatnonzero(is_high) + lookback:
+        i = int(idx)
+        out.append(
+            RawSwing(
+                i,
+                i + lookback,
+                float(series.high[i]),
+                SwingKind.HIGH,
+                datetime.fromtimestamp(int(ts[i]), UTC),
             )
-        elif np.all(low[i] < low[left]) and np.all(low[i] <= low[right]):
-            out.append(
-                RawSwing(
-                    i,
-                    i + lookback,
-                    float(low[i]),
-                    SwingKind.LOW,
-                    datetime.fromtimestamp(int(series.ts[i]), UTC),
-                )
+        )
+    for idx in np.flatnonzero(is_low) + lookback:
+        i = int(idx)
+        out.append(
+            RawSwing(
+                i,
+                i + lookback,
+                float(series.low[i]),
+                SwingKind.LOW,
+                datetime.fromtimestamp(int(ts[i]), UTC),
             )
+        )
 
     out.sort(key=lambda s: s.index)
     out = _alternate(out)
@@ -127,49 +142,60 @@ class StructureEngine:
             return events
 
         bias = Bias.NEUTRAL
-        broken_highs: set[int] = set()
-        broken_lows: set[int] = set()
+
+        # Precompute once. Reading series.body_ratio inside the loop recomputed the
+        # entire array on every bar and dominated the decision cycle.
+        body_ratios = series.body_ratio
+        closes = series.close
+        highs_arr = series.high
+        lows_arr = series.low
+        ts_arr = series.ts
+
+        # Swings become usable in confirmation order, so walk a pointer rather than
+        # re-filtering the whole swing list on every bar.
+        ordered = sorted((s for s in swings if s.structural), key=lambda s: s.confirmed_index)
+        ptr = 0
+        active_highs: list[RawSwing] = []
+        active_lows: list[RawSwing] = []
+
+        bos_disp = cfg.bos_min_displacement_atr * atr_value
+        mss_disp = cfg.mss_min_displacement_atr * atr_value
 
         for k in range(len(series)):
-            close_k = float(series.close[k])
-            body_ratio = float(series.body_ratio[k])
-            avail = [s for s in swings if s.confirmed_index <= k and s.index < k]
-            if not avail:
+            while ptr < len(ordered) and ordered[ptr].confirmed_index <= k:
+                sw = ordered[ptr]
+                (active_highs if sw.kind is SwingKind.HIGH else active_lows).append(sw)
+                ptr += 1
+            if not (active_highs or active_lows):
                 continue
 
-            highs = [
-                s
-                for s in avail
-                if s.kind is SwingKind.HIGH and s.structural and s.index not in broken_highs
-            ]
-            lows = [
-                s
-                for s in avail
-                if s.kind is SwingKind.LOW and s.structural and s.index not in broken_lows
-            ]
+            close_k = float(closes[k])
+            body_ratio = float(body_ratios[k])
+            if body_ratio < cfg.bos_min_body_ratio:
+                continue
 
-            # --- bullish break -------------------------------------------------------
-            if highs:
-                ref = highs[-1]
+            # --- bullish break ------------------------------------------------------
+            if active_highs:
+                ref = active_highs[-1]
                 disp = close_k - ref.price
                 broke = (
                     close_k > ref.price
                     if cfg.bos_require_body_close
-                    else float(series.high[k]) > ref.price
+                    else float(highs_arr[k]) > ref.price
                 )
-                if (
-                    broke
-                    and disp >= cfg.bos_min_displacement_atr * atr_value
-                    and (body_ratio >= cfg.bos_min_body_ratio)
-                ):
-                    broken_highs.add(ref.index)
+                if broke and disp >= bos_disp:
+                    # Every swing high at or below the break has been taken, not only
+                    # the most recent. Without this, one impulse fires a cascade of BOS
+                    # events as the walk falls back onto older, lower highs.
+                    while active_highs and active_highs[-1].price <= close_k:
+                        active_highs.pop()
                     against = bias is Bias.BEARISH
                     kind = StructureKind.CHOCH if against else StructureKind.BOS
-                    if against and disp >= cfg.mss_min_displacement_atr * atr_value:
+                    if against and disp >= mss_disp:
                         kind = StructureKind.MSS
                     events.append(
                         StructureEvent(
-                            ts=datetime.fromtimestamp(int(series.ts[k]), UTC),
+                            ts=datetime.fromtimestamp(int(ts_arr[k]), UTC),
                             timeframe=series.timeframe,
                             kind=kind,
                             direction=Direction.LONG,
@@ -184,28 +210,25 @@ class StructureEngine:
                     bias = Bias.BULLISH if kind is StructureKind.BOS else Bias.NEUTRAL
                     continue
 
-            # --- bearish break -------------------------------------------------------
-            if lows:
-                ref = lows[-1]
+            # --- bearish break ------------------------------------------------------
+            if active_lows:
+                ref = active_lows[-1]
                 disp = ref.price - close_k
                 broke = (
                     close_k < ref.price
                     if cfg.bos_require_body_close
-                    else float(series.low[k]) < ref.price
+                    else float(lows_arr[k]) < ref.price
                 )
-                if (
-                    broke
-                    and disp >= cfg.bos_min_displacement_atr * atr_value
-                    and (body_ratio >= cfg.bos_min_body_ratio)
-                ):
-                    broken_lows.add(ref.index)
+                if broke and disp >= bos_disp:
+                    while active_lows and active_lows[-1].price >= close_k:
+                        active_lows.pop()
                     against = bias is Bias.BULLISH
                     kind = StructureKind.CHOCH if against else StructureKind.BOS
-                    if against and disp >= cfg.mss_min_displacement_atr * atr_value:
+                    if against and disp >= mss_disp:
                         kind = StructureKind.MSS
                     events.append(
                         StructureEvent(
-                            ts=datetime.fromtimestamp(int(series.ts[k]), UTC),
+                            ts=datetime.fromtimestamp(int(ts_arr[k]), UTC),
                             timeframe=series.timeframe,
                             kind=kind,
                             direction=Direction.SHORT,

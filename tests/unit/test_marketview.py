@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
-from tests.fixtures.synthetic import trend
 
+from tests.fixtures.synthetic import trend
 from xauusd.core.indicators import atr, ema, percentile_rank, rsi, sma
 from xauusd.data.marketview import InMemoryBarSource, LookAheadError, MarketView
 from xauusd.data.series import BarSeries

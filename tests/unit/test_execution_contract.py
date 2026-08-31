@@ -10,8 +10,8 @@ import time
 from datetime import UTC
 
 import pytest
-from tests.fixtures.fake_bridge import FakeBridge, default_account, default_spec
 
+from tests.fixtures.fake_bridge import FakeBridge, default_account, default_spec
 from xauusd.domain.enums import Direction, OrderStatus, Timeframe
 from xauusd.domain.types import OrderRequest
 from xauusd.execution import retcodes as rc
