@@ -432,6 +432,30 @@ class KillSwitchEventRow(Base):
     auto_clearable: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class OperatorCommandRow(Base):
+    """A halt or flatten requested from the dashboard.
+
+    These live in the database rather than in the dashboard's memory for three reasons:
+    the two processes are separate, a queued emergency stop must survive a restart of
+    either, and an instruction to close every position is exactly the kind of thing that
+    needs a permanent record of who asked and what happened.
+    """
+
+    __tablename__ = "operator_commands"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    command: Mapped[str] = mapped_column(String(16))  # HALT | FLATTEN
+    reason: Mapped[str] = mapped_column(Text)
+    operator: Mapped[str] = mapped_column(String(64), default="dashboard")
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="QUEUED")
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (Index("ix_operator_commands_status", "status", "queued_at"),)
+
+
 class AlertRow(Base):
     __tablename__ = "alerts"
 

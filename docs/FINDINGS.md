@@ -246,3 +246,106 @@ The tree is now clean under both `ruff` and `mypy`, with four ruff rules disable
 explicitly and with reasons in `pyproject.toml` rather than by accretion. That is not
 tidiness for its own sake: a checker with 65 standing errors is a checker whose 66th —
 the real one — nobody sees.
+
+---
+
+## 17. A safety button wired to nothing
+
+The dashboard's HALT and FLATTEN posted to `/api/commands/*`, which appended a dict to
+`hub.commands` — a plain list on the `Hub` object in the API process. The engine runs in
+a *different process* and never read it. Nothing did, except `GET /api/commands/pending`,
+which returned the list and cleared it.
+
+So the sequence was: operator hits FLATTEN in an emergency, the UI says
+`"FLATTEN queued for the engine"`, and nothing happens. That is strictly worse than
+having no button at all — a missing control sends you to the terminal, a fake one tells
+you the account is being closed while it is not.
+
+Three things were wrong at once and each needed a different fix:
+
+- **Wrong medium.** Commands now live in `operator_commands` in the database, which both
+  processes already share. A queued emergency stop survives a restart of either, and an
+  instruction to close every position leaves a permanent record of who asked and what
+  happened. Claiming is a status transition inside the transaction, so a redelivery
+  cannot close a position twice.
+- **No consumer.** The engine now has a `_command_loop`, deliberately separate from the
+  M5 decision cycle so an emergency FLATTEN is not waiting behind a bar close.
+- **Silent failure.** If any position fails to close, the command is recorded `FAILED`
+  and a CRITICAL alert fires. The one thing this path must never do is report an account
+  flat when it is not.
+
+`FLATTEN` also trips the kill switch before closing. Flattening without halting invites
+re-entry on the next M5 close, which is the opposite of what the operator asked for.
+
+**Class of bug:** a feature whose two halves were written against an interface neither
+end implemented. Both sides looked complete in isolation. Worth asking of any control
+surface: what test proves the button reaches the thing it names?
+
+---
+
+## 18. An open control plane, one flag away
+
+The dashboard had no authentication of any kind. It bound to `127.0.0.1`, and that alone
+was carrying the entire security argument — including for `POST /api/commands/flatten`.
+
+The worst of it was `GET /api/commands/pending`, which *consumed* the queue. An
+unauthenticated reader could poll it and swallow the operator's emergency stop before the
+engine ever saw it. A read endpoint that destroys state is a hazard on its own; one that
+destroys safety state and needs no credentials is worse.
+
+The fix is not a token check on the three endpoints that looked dangerous:
+
+- Authentication is **middleware over `/api`**, not a per-route dependency, so a route
+  added next month is protected because of where it lives rather than because its author
+  remembered. The page shell stays open — a browser cannot attach a bearer header to a
+  top-level navigation, and the shell holds no data.
+- `DashboardConfig` **refuses to construct** with a non-loopback host and no token, and
+  `run()` re-checks because `--host` reaches uvicorn without passing through the config.
+  "Remember to set a token" is not a control; a bind that will not start is.
+- Reads are guarded too. The decision journal is the record of a live trading account.
+- The WebSocket takes the token as a query parameter, since middleware never sees a
+  WebSocket scope and the handshake cannot carry a header.
+
+**Class of bug:** a deployment assumption ("it's only on localhost") load-bearing for a
+security property, in a component whose entire purpose is to be looked at from somewhere
+else. The moment the user asks "how do I access this remotely", the assumption is gone
+and nothing replaces it.
+
+---
+
+## 19. The environment variables the runbook tells you to set were ignored
+
+`load_settings` merged `base.yaml`, `<env>.yaml` and `local.yaml`, then did:
+
+```python
+return Settings(**merged)
+```
+
+Passing the merged YAML as constructor arguments makes it **init state**, and in
+pydantic-settings init state outranks the environment. So any key that happened to
+appear in a YAML file silently ignored its `XAUUSD_*` variable, while any key that did
+not appear worked fine. `broker.login` worked (not in `base.yaml`); `database.url` did
+not (it is).
+
+`database.url` is the one that matters. `.env.example` and the deployment runbook both
+tell the operator to set `XAUUSD_DATABASE__URL` to their Postgres instance. Following
+that instruction exactly, on a live account, the engine would have gone on writing the
+decision journal and the position record to `sqlite:///data/xauusd.db` — no error, no
+warning, and `doctor` would have printed the SQLite path without anyone reading it as
+wrong, because it looks like a normal line of output.
+
+The fix is not to reorder `init_settings` and `env_settings` wholesale — that would make
+an explicit `Settings(mode=LIVE)` lose to an ambient variable, which is its own trap.
+The YAML is now a real settings *source* (`YamlSettingsSource`) placed below the
+environment, leaving the priority where a reader would expect it:
+
+    explicit arguments  >  environment  >  .env  >  YAML files  >  defaults
+
+**Class of bug:** configuration precedence that is invisible when wrong. Nothing raises,
+nothing logs, and the value you see is a plausible one — just not the one you set. It is
+worth testing precedence explicitly for any layered config, because no amount of reading
+the loader tells you what the library does with what you hand it.
+
+A related note: because the YAML layer is process-global (pydantic-settings builds its
+sources from the class, not the call), `load_settings` restores the previous layer in a
+`finally`. There is a test asserting the layer does not outlive its call.

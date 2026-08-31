@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from xauusd.domain.enums import Mode, Regime, Session, Timeframe
 
@@ -416,6 +416,67 @@ class AlertConfig(BaseModel):
     min_level: str = "WARNING"
 
 
+class DashboardConfig(BaseModel):
+    """The dashboard is the only component with a network listener and two write paths
+    (halt, flatten). Both properties make it the attack surface, so the bind address and
+    the token are validated together rather than left to the operator to get right."""
+
+    model_config = {"frozen": True}
+
+    host: str = "127.0.0.1"
+    port: int = 8000
+    auth_token: str | None = None
+    # Read by the engine to reach the dashboard's publish endpoint.
+    url: str = "http://127.0.0.1:8000"
+    command_poll_seconds: int = 5
+
+    @property
+    def is_loopback(self) -> bool:
+        return self.host in {"127.0.0.1", "localhost", "::1"}
+
+    @model_validator(mode="after")
+    def _remote_bind_requires_a_token(self) -> DashboardConfig:
+        # A token is optional on loopback, where the OS is the boundary. Off loopback
+        # there is no boundary, and /api/commands/flatten is a POST away — so refuse to
+        # start rather than serve an open control surface.
+        if not self.is_loopback and not self.auth_token:
+            raise ValueError(
+                f"dashboard.host={self.host!r} is not loopback and no auth_token is set. "
+                "The dashboard can halt the engine and flatten positions; it must not be "
+                "reachable off-host without a token. Set XAUUSD_DASHBOARD__AUTH_TOKEN, or "
+                "keep host=127.0.0.1 and reach it over WireGuard or an SSH tunnel."
+            )
+        if self.auth_token is not None and len(self.auth_token) < 16:
+            raise ValueError("dashboard.auth_token must be at least 16 characters")
+        return self
+
+
+# The merged YAML layer, published for the settings source below. It is process-global
+# because pydantic-settings constructs its sources from the class, not the call.
+_YAML_LAYER: dict[str, Any] = {}
+
+
+class YamlSettingsSource(PydanticBaseSettingsSource):
+    """The layered YAML files, as a settings SOURCE rather than constructor arguments.
+
+    This distinction is the whole point. Passing the merged YAML as `Settings(**merged)`
+    made it init state, and init state outranks the environment in pydantic-settings —
+    so every key that happened to appear in base.yaml silently ignored its XAUUSD_*
+    variable. `XAUUSD_DATABASE__URL` was the dangerous one: an operator following
+    .env.example would point at Postgres and keep journalling to local SQLite, with no
+    error to say otherwise.
+
+    As a source it can be ordered properly: explicit arguments win, then the
+    environment, then these files, then the defaults.
+    """
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        return _YAML_LAYER.get(field_name), field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        return dict(_YAML_LAYER)
+
+
 class Settings(BaseSettings):
     """Root configuration object."""
 
@@ -455,8 +516,27 @@ class Settings(BaseSettings):
     broker: BrokerConfig = Field(default_factory=BrokerConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
 
     enabled_strategies: list[str] = Field(default_factory=lambda: ["sweep_mss_fvg"])
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Highest priority first: explicit arguments, environment, .env, YAML, secrets."""
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            YamlSettingsSource(settings_cls),
+            file_secret_settings,
+        )
 
     @model_validator(mode="after")
     def _live_requires_mode(self) -> Settings:
@@ -498,10 +578,17 @@ def load_settings(
         if path.exists():
             loaded = yaml.safe_load(path.read_text()) or {}
             merged = _deep_merge(merged, loaded)
-    if overrides:
-        merged = _deep_merge(merged, overrides)
     merged.setdefault("env", env)
-    return Settings(**merged)
+
+    global _YAML_LAYER
+    previous = _YAML_LAYER
+    _YAML_LAYER = merged
+    try:
+        # `overrides` stays init state: an explicit argument outranks the environment,
+        # which is what a caller passing one means.
+        return Settings(**(overrides or {}))
+    finally:
+        _YAML_LAYER = previous
 
 
 def verify_live_arming(settings: Settings, account_login: int) -> tuple[bool, str]:

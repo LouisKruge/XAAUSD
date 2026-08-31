@@ -18,7 +18,7 @@ routes only `A` / `A+` decisions to an execution layer guarded by hard risk inva
 | | |
 |---|---|
 | **Phases complete** | 1–12 (foundation → dashboard) |
-| **Tests** | 274 unit + 19 integration, including a backtest/live parity gate |
+| **Tests** | 316 unit + 53 integration, including a backtest/live parity gate |
 | **`LIVE_TRADING`** | `false`, and requires two-key arming to change |
 | **Next** | Phase 13 (paper → demo, ≥4 weeks) and Phase 14 (small live) — both are wall-clock work that cannot be compressed |
 
@@ -37,6 +37,11 @@ python -m xauusd.cli backtest --synthetic 30000 --step 6
 python scripts/seed_demo_data.py 45         # populate a throwaway DB for the dashboard
 python -m xauusd.cli dashboard              # http://127.0.0.1:8000
 ```
+
+The dashboard binds to loopback. To reach it from another machine, tunnel it
+(`ssh -N -L 8000:127.0.0.1:8000 you@host`) — it can halt the engine and flatten every
+position, so binding it to a routable address without `XAUUSD_DASHBOARD__AUTH_TOKEN` is
+refused at startup rather than served. See `docs/DEPLOYMENT.md`.
 
 Answering the two questions the brief requires:
 

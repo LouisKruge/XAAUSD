@@ -1,0 +1,62 @@
+# Datastores for the trading engine.
+#
+# The engine, the bridge and the dashboard are NOT in here. The bridge must run on the
+# Windows host beside the MT5 terminal (the MetaTrader5 binding is Windows-only and
+# process-global), and running the engine in a container while its broker connection
+# lives outside it buys nothing but an extra hop on the path that places orders.
+#
+#   docker compose up -d
+#   alembic upgrade head
+#
+# Both services bind to 127.0.0.1 only. Postgres holds the decision journal and the
+# position record for a real trading account; it has no business being reachable off-host.
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: xauusd-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: xauusd
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: xauusd
+      # Checksums catch silent corruption in the journal, which is the one thing here
+      # that cannot be regenerated from anywhere else.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xauusd -d xauusd"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: xauusd-redis
+    restart: unless-stopped
+    # Redis carries live state between the engine and the dashboard. It is a cache, not
+    # a record — appendonly keeps a restart from dropping in-flight state on the floor,
+    # but nothing that matters is stored only here.
+    command: >
+      redis-server
+      --appendonly yes
+      --save 60 1000
+      --maxmemory 256mb
+      --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres-data:
+  redis-data:

@@ -241,8 +241,36 @@ function ledgerBars(container, ledger) {
 
 const state = { data: {}, decisions: [], performance: null, rejections: null, config: null };
 
+// Bearer token. Empty on a loopback deployment, where the server requires none.
+// Held per-browser; it is never sent anywhere but this origin.
+function authToken() {
+  try { return localStorage.getItem('xauusd_token') || ''; } catch (e) { return ''; }
+}
+
+function authHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  const t = authToken();
+  if (t) h['Authorization'] = `Bearer ${t}`;
+  return h;
+}
+
+function promptForToken() {
+  const t = prompt('This dashboard requires an access token.');
+  if (!t) return false;
+  try { localStorage.setItem('xauusd_token', t.trim()); } catch (e) { return false; }
+  return true;
+}
+
 async function api(path) {
-  const r = await fetch(path);
+  const r = await fetch(path, { headers: authHeaders() });
+  if (r.status === 401) {
+    // Ask once, then retry. A wrong token must not spin.
+    if (promptForToken()) {
+      const retry = await fetch(path, { headers: authHeaders() });
+      if (retry.ok) return retry.json();
+    }
+    throw new Error(`${path} -> 401 (token rejected)`);
+  }
   if (!r.ok) throw new Error(`${path} -> ${r.status}`);
   return r.json();
 }
@@ -553,7 +581,10 @@ function setConnected(ok) {
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   let ws;
-  try { ws = new WebSocket(`${proto}://${location.host}/ws`); }
+  // The handshake cannot carry a header, so the token goes in the query string.
+  const t = authToken();
+  const qs = t ? `?token=${encodeURIComponent(t)}` : '';
+  try { ws = new WebSocket(`${proto}://${location.host}/ws${qs}`); }
   catch (e) { return; }
   ws.onmessage = (ev) => {
     try {
@@ -569,11 +600,19 @@ function connectWs() {
 async function sendCommand(name) {
   const reason = prompt(`Reason for ${name}? (recorded in the audit log)`);
   if (!reason) return;
-  await fetch(`/api/commands/${name.toLowerCase()}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+  const r = await fetch(`/api/commands/${name.toLowerCase()}`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ reason, operator: 'dashboard' }),
   });
-  alert(`${name} queued for the engine. The dashboard never touches the broker directly.`);
+  if (!r.ok) {
+    // Never report a safety command as sent when it was not.
+    alert(`${name} was NOT queued (${r.status}). Check the terminal directly.`);
+    return;
+  }
+  const cmd = await r.json();
+  alert(`${name} queued as #${cmd.id}. The engine executes it on its next poll; the `
+      + `dashboard never touches the broker directly.`);
 }
 
 function init() {

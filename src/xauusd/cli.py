@@ -21,6 +21,8 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from xauusd.config.settings import Settings, load_settings, verify_live_arming
 from xauusd.database.repositories import Repositories
 from xauusd.database.session import Database
@@ -93,6 +95,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"{settings.risk.max_monthly_drawdown_pct:.1%}"
     )
     print(f"min RR           : {settings.thresholds.min_rr}")
+
+    dash = settings.dashboard
+    if dash.is_loopback:
+        exposure = f"loopback ({dash.host}:{dash.port}) — tunnel to reach it remotely"
+    elif dash.auth_token:
+        exposure = f"{dash.host}:{dash.port} WITH a token — reachable off-host"
+    else:  # DashboardConfig refuses to construct in this state; belt and braces.
+        exposure = f"{dash.host}:{dash.port} WITHOUT a token — REFUSED at startup"
+    print(f"dashboard        : {exposure}")
 
     ok = True
     try:
@@ -267,6 +278,34 @@ def _load_data(args: argparse.Namespace, settings: Settings) -> dict:
     )
 
 
+def cmd_validate(args: argparse.Namespace) -> int:
+    """The Phase 10 deployment gate — the only thing that can make a strategy live-eligible.
+
+    Delegates to scripts/run_validation.py so there is exactly one implementation of the
+    gate. Expect it to FAIL for most strategy versions; that is the gate working.
+    """
+    import subprocess
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "run_validation.py"
+    if not script.exists():
+        print(f"validation script not found at {script}", file=sys.stderr)
+        return 2
+
+    cmd = [sys.executable, str(script)]
+    for flag, value in (
+        ("--synthetic", args.synthetic),
+        ("--seed", args.seed),
+        ("--source", args.source),
+        ("--warmup", args.warmup),
+        ("--step", args.step),
+        ("--strategy", args.strategy),
+        ("--json", args.json),
+    ):
+        if value is not None:
+            cmd += [flag, str(value)]
+    return subprocess.call(cmd)
+
+
 def cmd_explain(args: argparse.Namespace) -> int:
     settings = load_settings(env=args.env)
     db = Database(settings.database.url)
@@ -390,8 +429,8 @@ def main(argv: list[str] | None = None) -> int:
     run_p.set_defaults(func=cmd_run)
 
     dash = sub.add_parser("dashboard", help="start the dashboard server")
-    dash.add_argument("--host", default="127.0.0.1")
-    dash.add_argument("--port", type=int, default=8000)
+    dash.add_argument("--host", default=None, help="overrides dashboard.host")
+    dash.add_argument("--port", type=int, default=None, help="overrides dashboard.port")
     dash.add_argument("--reload", action="store_true")
     dash.set_defaults(func=cmd_dashboard)
 
@@ -420,6 +459,16 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--json", default=None, help="write metrics to this path")
     bt.set_defaults(func=cmd_backtest)
 
+    va = sub.add_parser("validate", help="run the full validation suite (the deployment gate)")
+    va.add_argument("--synthetic", type=int, default=None, help="generate N synthetic M1 bars")
+    va.add_argument("--seed", type=int, default=None)
+    va.add_argument("--source", default=None, help="bar source when not synthetic")
+    va.add_argument("--warmup", type=int, default=None)
+    va.add_argument("--step", type=int, default=None)
+    va.add_argument("--strategy", default=None)
+    va.add_argument("--json", default=None, help="write the gate report to this path")
+    va.set_defaults(func=cmd_validate)
+
     ex = sub.add_parser("explain", help="print the full reasoning for one decision")
     ex.add_argument("decision_id", type=int)
     ex.set_defaults(func=cmd_explain)
@@ -433,7 +482,18 @@ def main(argv: list[str] | None = None) -> int:
     arm.set_defaults(func=cmd_arm_live)
 
     args = p.parse_args(argv)
-    return int(args.func(args) or 0)
+    try:
+        return int(args.func(args) or 0)
+    except ValidationError as exc:
+        # A bad config is the most common reason any of these commands cannot run, and
+        # `doctor` in particular exists to say what is wrong. A pydantic traceback buries
+        # that message under twenty frames of validator internals.
+        print("configuration is invalid:\n", file=sys.stderr)
+        for err in exc.errors():
+            where = ".".join(str(x) for x in err["loc"]) or "(root)"
+            print(f"  {where}: {err['msg']}", file=sys.stderr)
+        print("\nNOT READY — fix the configuration above.", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

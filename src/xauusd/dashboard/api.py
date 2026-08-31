@@ -12,14 +12,24 @@ The API never places or modifies an order itself.
 from __future__ import annotations
 
 import json
+import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -97,13 +107,37 @@ def get_settings() -> Settings:
     return _settings
 
 
-def get_repos():  # type: ignore[no-untyped-def]
+def _database() -> Database:
     global _db
     if _db is None:
         _db = Database(get_settings().database.url)
         _db.create_all()
-    with _db.session() as s:
+    return _db
+
+
+def get_repos():  # type: ignore[no-untyped-def]
+    with _database().session() as s:
         yield Repositories(s)
+
+
+def require_token(authorization: str | None = Header(default=None)) -> None:
+    """Bearer-token gate on every route.
+
+    When no token is configured the dashboard is loopback-only (enforced in
+    DashboardConfig), so the OS is the boundary and this is a no-op. Once a token is
+    set it is required everywhere — including the read endpoints, because the decision
+    journal is the record of a live trading account, and including the engine-facing
+    endpoints, because GET /api/commands/pending consumes the queue.
+    """
+    expected = get_settings().dashboard.auth_token
+    if not expected:
+        return
+    supplied = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        supplied = authorization[7:]
+    # compare_digest so a wrong token cannot be recovered a byte at a time.
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="invalid or missing bearer token")
 
 
 @asynccontextmanager
@@ -114,6 +148,25 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 
 
 app = FastAPI(title="XAUUSD Trading Terminal", version="0.1.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def authenticate(request: Request, call_next: Any) -> Any:
+    """Guard every /api path.
+
+    Deliberately a middleware and not a per-route dependency: a route added later is
+    protected because it is under /api, not because whoever wrote it remembered to ask.
+    The page shell and its assets are served unauthenticated — they contain no data, and
+    the browser cannot attach a bearer header to a top-level navigation.
+    """
+    if request.url.path.startswith("/api"):
+        try:
+            require_token(request.headers.get("authorization"))
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -372,28 +425,59 @@ async def kill_switch_history(repos=Depends(get_repos)) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------------------
 
 
+def _queue(command: str, req: CommandRequest) -> dict[str, Any]:
+    """Persist the request, so it survives a restart of either process and leaves a
+    record of who asked. The API never touches the broker."""
+    db = _database()
+    with db.session() as s:
+        command_id = Repositories(s).commands.queue(command, req.reason, req.operator)
+    log.warning(
+        "operator_command_queued",
+        command=command,
+        command_id=command_id,
+        reason=req.reason,
+        operator=req.operator,
+    )
+    return {
+        "queued": True,
+        "id": command_id,
+        "command": command,
+        "queued_at": datetime.now(UTC).isoformat(),
+    }
+
+
 @app.post("/api/commands/halt")
 async def halt(req: CommandRequest) -> dict[str, Any]:
-    """Trip the kill switch. Queued for the engine; the API never touches the broker."""
-    cmd = hub.queue_command("HALT", {"reason": req.reason, "operator": req.operator})
+    """Trip the kill switch. Picked up by the engine on its next poll."""
+    cmd = _queue("HALT", req)
     await hub.broadcast("command", cmd)
-    return {"queued": True, "command": cmd}
+    return cmd
 
 
 @app.post("/api/commands/flatten")
 async def flatten(req: CommandRequest) -> dict[str, Any]:
-    """Close all positions. Queued for the engine, audited, never executed here."""
-    cmd = hub.queue_command("FLATTEN", {"reason": req.reason, "operator": req.operator})
+    """Close all positions. Picked up by the engine on its next poll."""
+    cmd = _queue("FLATTEN", req)
     await hub.broadcast("command", cmd)
-    return {"queued": True, "command": cmd}
+    return cmd
 
 
-@app.get("/api/commands/pending")
-async def pending_commands() -> list[dict[str, Any]]:
-    """Polled by the engine. Returns and clears the queue."""
-    out = list(hub.commands)
-    hub.commands.clear()
-    return out
+@app.get("/api/commands")
+async def command_history(repos=Depends(get_repos)) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
+    """The audit trail: what was asked, by whom, and what the engine did about it."""
+    return [
+        {
+            "id": r.id,
+            "command": r.command,
+            "reason": r.reason,
+            "operator": r.operator,
+            "status": r.status,
+            "queued_at": r.queued_at,
+            "completed_at": r.completed_at,
+            "result": r.result,
+        }
+        for r in repos.commands.recent(50)
+    ]
 
 
 # --------------------------------------------------------------------------------------
@@ -402,7 +486,13 @@ async def pending_commands() -> list[dict[str, Any]]:
 
 
 @app.websocket("/ws")
-async def websocket(ws: WebSocket) -> None:
+async def websocket(ws: WebSocket, token: str | None = Query(default=None)) -> None:
+    # The HTTP middleware does not see WebSocket scopes, and a browser cannot set a
+    # header on a WebSocket handshake, so the token comes as a query parameter.
+    expected = get_settings().dashboard.auth_token
+    if expected and (not token or not secrets.compare_digest(token, expected)):
+        await ws.close(code=1008)  # policy violation
+        return
     await hub.connect(ws)
     try:
         while True:
@@ -435,7 +525,26 @@ async def index() -> Any:
     )
 
 
-def run(host: str = "127.0.0.1", port: int = 8000, reload: bool = False) -> None:
+def run(host: str | None = None, port: int | None = None, reload: bool = False) -> None:
     import uvicorn
+
+    cfg = get_settings().dashboard
+    host = host or cfg.host
+    port = port or cfg.port
+
+    # DashboardConfig enforces this for configured values; re-check here because a
+    # --host flag reaches uvicorn without passing through the config at all.
+    loopback = host in {"127.0.0.1", "localhost", "::1"}
+    if not loopback and not cfg.auth_token:
+        raise SystemExit(
+            f"refusing to bind the dashboard to {host}: it can halt the engine and "
+            "flatten positions, and no auth_token is set.\n"
+            "Set XAUUSD_DASHBOARD__AUTH_TOKEN, or keep the default 127.0.0.1 bind and "
+            "reach it over WireGuard or an SSH tunnel."
+        )
+    if cfg.auth_token:
+        log.info("dashboard_auth_enabled", host=host, port=port)
+    else:
+        log.warning("dashboard_auth_disabled", host=host, port=port, detail="loopback only")
 
     uvicorn.run("xauusd.dashboard.api:app", host=host, port=port, reload=reload, log_level="info")

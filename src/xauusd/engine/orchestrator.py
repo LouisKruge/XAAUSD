@@ -183,6 +183,19 @@ class TradingEngine:
             log.error("broker_unreachable_at_startup", error=str(exc))
             return False
 
+        # A crash between claiming an operator command and executing it would strand it
+        # at CLAIMED. Both commands are idempotent, so returning them to the queue is
+        # safer than dropping what may be an emergency stop.
+        with self.db.session() as s:
+            stranded = Repositories(s).commands.requeue_stale_claims()
+        if stranded:
+            log.warning("operator_commands_requeued", ids=stranded)
+            self.notifier.critical(
+                "STARTUP",
+                "Operator commands were interrupted",
+                f"commands {stranded} were claimed but never completed; re-queued",
+            )
+
         # Two-key arming. The config flag alone can never enable live trading.
         if self.settings.mode is Mode.LIVE:
             armed, why = verify_live_arming(self.settings, account.login)
@@ -286,6 +299,7 @@ class TradingEngine:
             self._decision_loop(),
             self._reconcile_loop(),
             self._context_loop(),
+            self._command_loop(),
             return_exceptions=True,
         )
 
@@ -441,6 +455,92 @@ class TradingEngine:
                 self.health.report("reconciler", result.clean)
             except Exception as exc:
                 log.error("reconcile_loop_error", error=str(exc))
+
+    async def _command_loop(self) -> None:
+        """Poll the operator command queue written by the dashboard.
+
+        The dashboard cannot reach the broker; it records an intent and this is the only
+        thing that acts on one. Kept on its own loop so an emergency FLATTEN is not
+        waiting behind the M5 decision cycle.
+        """
+        interval = max(1, self.settings.dashboard.command_poll_seconds)
+        while self.running:
+            await asyncio.sleep(interval)
+            try:
+                await asyncio.to_thread(self._drain_commands)
+            except Exception as exc:
+                log.error("command_loop_error", error=f"{type(exc).__name__}: {exc}")
+
+    def _drain_commands(self) -> int:
+        """Claim, execute and record. Returns the number of commands handled."""
+        with self.db.session() as s:
+            claimed = [
+                (r.id, r.command, r.reason, r.operator)
+                for r in Repositories(s).commands.claim_pending()
+            ]
+        for command_id, command, reason, operator in claimed:
+            try:
+                result = self._execute_command(command, reason, operator)
+                ok = True
+            except Exception as exc:
+                result = f"{type(exc).__name__}: {exc}"
+                ok = False
+                log.error("operator_command_failed", command=command, error=result)
+            with self.db.session() as s:
+                Repositories(s).commands.complete(command_id, result, ok=ok)
+            log.warning(
+                "operator_command_executed",
+                command=command,
+                command_id=command_id,
+                operator=operator,
+                result=result,
+                ok=ok,
+            )
+        return len(claimed)
+
+    def _execute_command(self, command: str, reason: str, operator: str) -> str:
+        now = datetime.now(UTC)
+        if command == "HALT":
+            self.kill_switch.trip(
+                KillSwitchReason.MANUAL,
+                f"halted from the dashboard by {operator}: {reason}",
+                {"operator": operator},
+                now,
+            )
+            return "kill switch tripped (MANUAL); no new positions will be opened"
+
+        if command == "FLATTEN":
+            # Halt first. Flattening without halting invites the engine to re-enter on
+            # the next M5 close, which is the opposite of what the operator asked for.
+            self.kill_switch.trip(
+                KillSwitchReason.MANUAL,
+                f"flatten requested from the dashboard by {operator}: {reason}",
+                {"operator": operator},
+                now,
+            )
+            positions = self.broker.positions(magic=self.settings.broker.magic)
+            closed: list[int] = []
+            failed: list[int] = []
+            for p in positions:
+                try:
+                    res = self.broker.close_position(p.ticket)
+                    (closed if res.ok else failed).append(p.ticket)
+                except Exception as exc:
+                    failed.append(p.ticket)
+                    log.error("flatten_close_failed", ticket=p.ticket, error=str(exc))
+                else:
+                    self.positions.forget(p.ticket)
+            if failed:
+                # Say so loudly: the operator must be told the account is not flat.
+                self.notifier.critical(
+                    "FLATTEN",
+                    "Flatten did not close every position",
+                    f"closed {closed}, FAILED {failed} — check the terminal now",
+                )
+                raise BrokerError(f"closed {len(closed)}, failed to close {failed}")
+            return f"closed {len(closed)} position(s): {closed}" if closed else "no open positions"
+
+        raise ValueError(f"unknown operator command {command!r}")
 
     async def _context_loop(self) -> None:
         while self.running:

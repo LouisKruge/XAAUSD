@@ -134,3 +134,50 @@ class TestLiveArming:
         f.write_text(json.dumps({"account_login": 111, "acknowledged_risk": True}))
         s = Settings(live_arming_file=str(f))  # live_trading defaults False
         assert not verify_live_arming(s, 111)[0]
+
+
+class TestSourcePrecedence:
+    """Explicit arguments beat the environment, which beats YAML, which beats defaults.
+
+    This was wrong in a way that produced no error at all. The merged YAML was passed as
+    `Settings(**merged)`, making it init state, and init state outranks the environment
+    in pydantic-settings — so every key that appeared in base.yaml silently ignored its
+    XAUUSD_* variable. `database.url` is the one that mattered: an operator following
+    .env.example would point at Postgres, see no complaint, and keep writing the decision
+    journal for a live account to a local SQLite file.
+    """
+
+    def test_the_environment_overrides_yaml(self, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        (cfg / "base.yaml").write_text("database:\n  url: sqlite:///from-yaml.db\n")
+
+        assert load_settings(config_dir=cfg).database.url == "sqlite:///from-yaml.db"
+
+        monkeypatch.setenv("XAUUSD_DATABASE__URL", "postgresql+psycopg://u:p@h:5432/db")
+        assert load_settings(config_dir=cfg).database.url == "postgresql+psycopg://u:p@h:5432/db"
+
+    def test_an_explicit_override_beats_the_environment(self, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        (cfg / "base.yaml").write_text("database:\n  url: sqlite:///from-yaml.db\n")
+        monkeypatch.setenv("XAUUSD_DATABASE__URL", "sqlite:///from-env.db")
+
+        settings = load_settings(
+            config_dir=cfg, overrides={"database": {"url": "sqlite:///explicit.db"}}
+        )
+        assert settings.database.url == "sqlite:///explicit.db"
+
+    def test_yaml_still_applies_when_no_variable_is_set(self, tmp_path) -> None:
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        (cfg / "base.yaml").write_text("symbol: XAUUSD.a\n")
+        assert load_settings(config_dir=cfg).symbol == "XAUUSD.a"
+
+    def test_the_yaml_layer_does_not_leak_between_loads(self, tmp_path) -> None:
+        """The layer is process-global, so a failed or nested load must restore it."""
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        (cfg / "base.yaml").write_text("symbol: XAUUSD.a\n")
+        load_settings(config_dir=cfg)
+        assert Settings().symbol == "XAUUSD", "the YAML layer outlived its load_settings call"

@@ -27,10 +27,21 @@ copy .env.example .env      # then fill it in
 Bring up the datastores and the schema:
 
 ```powershell
-docker compose up -d postgres redis
-$env:XAUUSD_DATABASE__URL="postgresql+psycopg://xauusd:xauusd@localhost:5432/xauusd"
+docker compose up -d          # postgres (+timescale) and redis, both bound to 127.0.0.1
 alembic upgrade head
 ```
+
+`POSTGRES_PASSWORD` has no default in `docker-compose.yml`; compose refuses to start
+until `.env` sets it. Put the same password in `XAUUSD_DATABASE__URL` — `demo.yaml` and
+`live.yaml` ship a placeholder (`xauusd:xauusd`) that you must not keep.
+
+Configuration precedence, highest first:
+
+    explicit arguments  >  environment  >  .env  >  config/*.yaml  >  defaults
+
+So a variable in `.env` overrides the YAML, which is what makes the credentials above
+work without editing a tracked file. This was the other way round until recently and
+failed silently — see finding 19 in `docs/FINDINGS.md`.
 
 ---
 
@@ -70,6 +81,30 @@ access use WireGuard, never a public port.
 
 ---
 
+## 2b. The validation gate — before any of the stages below
+
+Nothing reaches a live account until a strategy passes:
+
+```powershell
+python -m xauusd.cli validate --synthetic 60000
+```
+
+This is the Phase 10 deployment gate. It runs in-sample, out-of-sample, walk-forward,
+Monte Carlo and regime splits with realistic spread, slippage and commission, and prints
+a 24-criterion breakdown. **Expect it to fail.** A strategy that fails is not a broken
+build; it is the gate doing the only job it has.
+
+Until it passes, the strategy sits at `DEV` and the live-eligibility gate in
+`strategy/gates.py` refuses to route it in `LIVE` mode. Paper and demo run regardless —
+that is the point of them.
+
+At the time of writing **no strategy has passed**, so live routing is unreachable today
+no matter how the config is set. If you find yourself editing thresholds to get a pass,
+read `docs/FINDINGS.md` first: the thresholds are the product, and a variant that
+suddenly passes after a parameter change deserves more suspicion, not less.
+
+---
+
 ## 3. Stage 4 — Paper trading
 
 Live market data, simulated fills. Runs for at least two weeks.
@@ -79,6 +114,36 @@ $env:XAUUSD_ENV="demo"
 python -m xauusd.cli run
 python -m xauusd.cli dashboard      # separate terminal
 ```
+
+### Reaching the dashboard
+
+It binds to `127.0.0.1:8000`. On the VPS itself, that is all you need.
+
+To reach it from your own machine, **tunnel — do not bind it publicly**:
+
+```powershell
+ssh -N -L 8000:127.0.0.1:8000 you@your-vps      # then open http://localhost:8000
+```
+
+The dashboard can trip the kill switch and close every open position, so binding it to
+a routable address without a token is refused at startup rather than served. If you have
+a genuine reason to expose it (a WireGuard address, say), set a token first:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+$env:XAUUSD_DASHBOARD__AUTH_TOKEN="<the generated token>"
+$env:XAUUSD_DASHBOARD__HOST="10.8.0.2"          # the WireGuard address, never 0.0.0.0
+```
+
+The page then prompts for the token once and keeps it in that browser. Every `/api` path
+requires it, including the read endpoints — the decision journal is the record of a live
+trading account — and including the WebSocket, which takes it as a query parameter.
+
+**HALT and FLATTEN** are recorded in `operator_commands` and executed by the engine on
+its next poll (5s by default), never by the dashboard process. `FLATTEN` halts first, so
+the engine cannot re-enter on the next M5 close. If any position fails to close you get
+a CRITICAL alert and the command is recorded `FAILED` — it will never tell you the
+account is flat when it is not. `GET /api/commands` is the audit trail.
 
 **What you are looking for is not profit.** At this stage you are checking that the
 machinery is sane:

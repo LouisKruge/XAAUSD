@@ -30,6 +30,7 @@ from xauusd.database.models import (
     MarketSnapshotRow,
     NewsAssessmentRow,
     NewsItemRow,
+    OperatorCommandRow,
     OrderRow,
     PositionEventRow,
     PositionRow,
@@ -767,6 +768,85 @@ class SnapshotRepository:
         ).scalar()
 
 
+class OperatorCommandRepository:
+    """Queue and audit for the dashboard's two write paths."""
+
+    def __init__(self, session: Session) -> None:
+        self.s = session
+
+    def queue(self, command: str, reason: str, operator: str = "dashboard") -> int:
+        if command not in {"HALT", "FLATTEN"}:
+            raise ValueError(f"unknown operator command {command!r}")
+        row = OperatorCommandRow(command=command, reason=reason, operator=operator)
+        self.s.add(row)
+        self.s.flush()
+        return int(row.id)
+
+    def claim_pending(self, limit: int = 10) -> list[OperatorCommandRow]:
+        """Take the queued commands and mark them claimed in the same transaction.
+
+        Claiming is what stops a command being executed twice if the engine restarts
+        mid-cycle. A claimed-but-not-completed row is visible in the audit trail as
+        exactly that, rather than vanishing.
+        """
+        rows = list(
+            self.s.execute(
+                select(OperatorCommandRow)
+                .where(OperatorCommandRow.status == "QUEUED")
+                .order_by(OperatorCommandRow.queued_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+                if self.s.bind is not None and self.s.bind.dialect.name == "postgresql"
+                else select(OperatorCommandRow)
+                .where(OperatorCommandRow.status == "QUEUED")
+                .order_by(OperatorCommandRow.queued_at)
+                .limit(limit)
+            ).scalars()
+        )
+        now = datetime.now(UTC)
+        for r in rows:
+            r.status = "CLAIMED"
+            r.claimed_at = now
+        self.s.flush()
+        return rows
+
+    def requeue_stale_claims(self) -> list[int]:
+        """Return CLAIMED-but-never-completed commands to the queue.
+
+        A crash between claiming and executing would otherwise strand an emergency stop
+        at CLAIMED forever — the one failure mode that must not be silent. Both commands
+        are idempotent in effect (HALT trips an already-tripped switch; FLATTEN closes
+        whatever is still open), so re-running one is strictly safer than dropping it.
+        """
+        rows = list(
+            self.s.execute(
+                select(OperatorCommandRow).where(OperatorCommandRow.status == "CLAIMED")
+            ).scalars()
+        )
+        for r in rows:
+            r.status = "QUEUED"
+            r.claimed_at = None
+        self.s.flush()
+        return [int(r.id) for r in rows]
+
+    def complete(self, command_id: int, result: str, ok: bool = True) -> None:
+        row = self.s.get(OperatorCommandRow, command_id)
+        if row is None:
+            return
+        row.status = "DONE" if ok else "FAILED"
+        row.result = result
+        row.completed_at = datetime.now(UTC)
+
+    def recent(self, limit: int = 50) -> list[OperatorCommandRow]:
+        return list(
+            self.s.execute(
+                select(OperatorCommandRow)
+                .order_by(OperatorCommandRow.queued_at.desc())
+                .limit(limit)
+            ).scalars()
+        )
+
+
 class Repositories:
     """Convenience aggregate so callers take one dependency, not twelve."""
 
@@ -785,3 +865,4 @@ class Repositories:
         self.backtests = BacktestRepository(session)
         self.config = ConfigRepository(session)
         self.snapshots = SnapshotRepository(session)
+        self.commands = OperatorCommandRepository(session)

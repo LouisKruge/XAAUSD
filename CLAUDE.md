@@ -50,7 +50,8 @@ python -m xauusd.cli doctor          # pre-flight: config, DB, broker, symbol sp
 python -m xauusd.cli backtest --synthetic 30000 --step 6
 python -m xauusd.cli explain <id>    # full reasoning for one decision
 python -m xauusd.cli rejections      # why the bot did not trade
-python scripts/run_validation.py --synthetic 60000    # the Phase 10 deployment gate
+python -m xauusd.cli validate --synthetic 60000       # the Phase 10 deployment gate
+python -m xauusd.cli dashboard       # loopback by default; a remote bind needs a token
 
 pytest tests/unit -q                 # fast
 pytest tests/integration -q          # includes the backtest/live parity gate
