@@ -204,3 +204,135 @@ def market(
     return build_timeframes(
         m5, [Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1, Timeframe.W1]
     )
+
+
+def market_with_planted_long_setup(
+    seed: int = 21,
+    uptrend_bars: int = 22000,
+) -> dict[Timeframe, BarSeries]:
+    """A market containing a KNOWN, complete A-grade long setup.
+
+    Random-walk data almost never contains the full confluence chain, so asserting
+    "the trade path fires" against it is a coin flip. This fixture plants the whole
+    chain deterministically, the same way sweep_and_reverse() does for the individual
+    engines, so the test asserts a specific thing rather than hoping.
+
+    Layout, in M5 bars:
+      0 .. N-260   a long, clean uptrend — long enough that D1 clears the structure
+                   engine's 50-bar minimum and reads BULLISH
+      N-260..N-120 a pullback into discount forming two EQUAL LOWS
+      N-120..N-112 a SWEEP of those lows, closing back above them
+      N-112..N-96  bullish DISPLACEMENT breaking structure, leaving a bullish FVG
+      N-96 ..N-1   a retrace back into that FVG  <- the entry
+
+    The start time is solved for so the entry lands inside the London session; a setup
+    outside validated hours is correctly rejected by the session gate, which would make
+    this fixture useless for testing anything else.
+    """
+    best: dict[Timeframe, BarSeries] | None = None
+    t0 = datetime(2026, 1, 7, 0, 0, tzinfo=UTC)
+    for _ in range(24):
+        built = _plant_long_setup(seed, t0, uptrend_bars)
+        last = built[Timeframe.M5].last_ts
+        if 9 <= last.hour <= 15 and last.weekday() < 5:
+            return built
+        best = built
+        # Shift the whole series by an hour and try again.
+        t0 = t0 + timedelta(hours=1)
+    assert best is not None
+    return best
+
+
+def _plant_long_setup(seed: int, t0: datetime, uptrend_bars: int) -> dict[Timeframe, BarSeries]:
+    from xauusd.data.resample import build_timeframes
+
+    rng = np.random.RandomState(seed)
+    bars: list[Bar] = []
+    price = 2400.0
+    ts = t0
+
+    # Everything planted below is sized in units of the prevailing bar range. A move
+    # scaled in absolute points instead would be many ATR wide and the regime engine
+    # would correctly classify the market as ABNORMAL and refuse to trade it — which
+    # is right, and which makes an unscaled fixture useless.
+    noise = 0.35
+    bar_range = noise * 2.2  # ~ the typical M5 range this generator produces
+
+    def push(o: float, h: float, lo: float, c: float) -> None:
+        nonlocal ts
+        while ts.weekday() == 5 or (ts.weekday() == 6 and ts.hour < 22):
+            ts += timedelta(minutes=5)
+        bars.append(
+            Bar(ts, float(o), float(h), float(lo), float(c), tick_volume=120, spread_points=20)
+        )
+        ts += timedelta(minutes=5)
+
+    # --- 1. a long clean uptrend -----------------------------------------------------
+    for _ in range(uptrend_bars):
+        o = price
+        c = o + 0.06 + rng.randn() * noise
+        push(o, max(o, c) + abs(rng.randn()) * 0.3, min(o, c) - abs(rng.randn()) * 0.3, c)
+        price = c
+
+    peak = price
+
+    # --- 2. a deep pullback into discount, forming two equal lows --------------------
+    #     Deep enough that the later retrace sits in the LOWER half of the dealing
+    #     range; a long in premium is correctly rejected by the premium/discount gate.
+    eq_low = peak - bar_range * 55
+    for i in range(150):
+        o = price
+        c = peak - (peak - (eq_low + bar_range * 2)) * (i + 1) / 150.0
+        push(o, max(o, c) + 0.4, min(o, c) - 0.4, c)
+        price = c
+    for _ in range(2):
+        for _ in range(16):
+            o = price
+            c = o - (o - eq_low) * 0.30
+            push(o, o + 0.4, min(o, c) - 0.2, c)
+            price = c
+        push(price, price + 0.5, eq_low, eq_low + bar_range)  # touch the level
+        price = eq_low + bar_range
+        for _ in range(14):
+            o = price
+            c = o + bar_range * 0.9
+            push(o, c + 0.4, o - 0.3, c)
+            price = c
+
+    # --- 3. the sweep: takes the equal lows, closes back above -----------------------
+    push(price, price + 0.3, eq_low - bar_range * 0.8, eq_low + bar_range * 1.4)
+    price = eq_low + bar_range * 1.4
+
+    # --- 4. bullish displacement breaking structure, leaving an FVG ------------------
+    #     ~2.5 ATR: decisive enough to qualify, not so violent that it is abnormal.
+    push(price, price + bar_range * 1.2, price - 0.3, price + bar_range * 1.0)
+    price += bar_range * 1.0
+    gap_lo = price + bar_range * 0.2
+    push(
+        price + bar_range * 0.6,
+        price + bar_range * 3.2,
+        price + bar_range * 0.5,
+        price + bar_range * 2.9,
+    )  # the displacement bar
+    price += bar_range * 2.9
+    gap_hi = price - bar_range * 1.4
+    push(price + 0.2, price + bar_range * 1.2, gap_hi, price + bar_range * 0.9)
+    price += bar_range * 0.9
+    for _ in range(8):
+        o = price
+        c = o + bar_range * 0.55
+        push(o, c + 0.3, o - 0.25, c)
+        price = c
+
+    # --- 5. retrace back into the FVG — the entry -----------------------------------
+    target = (gap_hi + gap_lo) / 2.0
+    for _ in range(22):
+        o = price
+        c = price + (target - price) * 0.35
+        push(o, max(o, c) + 0.35, min(o, c) - 0.4, c)
+        price = c
+
+    m5 = BarSeries.from_bars(Timeframe.M5, bars)
+    return build_timeframes(
+        m5, [Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1, Timeframe.W1]
+    )

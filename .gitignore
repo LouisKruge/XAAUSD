@@ -23,7 +23,13 @@ config/local.*
 secrets/
 *.pem
 *.key
-live_arming_token*
+
+# The live arming file is KEY 2 of the two-key live-trading arm. It contains the
+# account number and is machine-specific by design — committing it would both leak the
+# account and let the flag travel to another machine.
+config/live_arming.json
+live_arming*.json
+!config/live_arming.example.json
 
 # Data lake / research artefacts (large, regenerable)
 data/lake/
@@ -31,6 +37,9 @@ data/raw/
 data/cache/
 *.parquet
 *.duckdb
+*.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 
