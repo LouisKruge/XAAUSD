@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from xauusd.config.settings import NewsConfig
 from xauusd.domain.enums import EventImpact
@@ -305,7 +305,7 @@ class RecurringEventSchedule:
         return sorted(out, key=lambda e: e.ts)
 
     @staticmethod
-    def _matches(rule: RecurringRule, day) -> bool:  # type: ignore[no-untyped-def]
+    def _matches(rule: RecurringRule, day: date) -> bool:
         if rule.rule == "first_friday":
             return day.weekday() == 4 and day.day <= 7
         if rule.rule == "weekly_thursday":

@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -153,7 +153,7 @@ class BacktestEngine:
         rejections: dict[str, int] = {}
         open_tags: set[str] = set()
         trades_today = 0
-        current_day: datetime | None = None
+        current_day: date | None = None
         bars_in_market = 0
 
         end_index = (

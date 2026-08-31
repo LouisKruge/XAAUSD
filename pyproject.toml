@@ -42,7 +42,25 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
-ignore = ["E501", "B008", "RUF012"]
+ignore = [
+    "E501",
+    "B008",
+    "RUF012",
+    # A guard ("is this rule enabled and applicable?") and the test it guards are
+    # different ideas. Collapsing them into one four-term `and` reads worse and
+    # leaves nowhere to hang the comment that explains the guard.
+    "SIM102",
+    "SIM103",
+    "SIM108",
+    # domain.enums.StrEnum is a deliberate local class with an explicit __str__,
+    # not an accidental reimplementation of the stdlib one.
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests unpack whole fixture tuples and use the part each case is about, and
+# build kwargs with dict() to keep parametrised cases readable.
+"tests/**" = ["RUF059", "C408"]
 
 [tool.mypy]
 python_version = "3.11"

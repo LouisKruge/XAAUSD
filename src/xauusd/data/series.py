@@ -123,21 +123,21 @@ class BarSeries:
 
     @property
     def body(self) -> np.ndarray:
-        return np.abs(self.close - self.open)
+        return np.asarray(np.abs(self.close - self.open))
 
     @property
     def range(self) -> np.ndarray:
-        return self.high - self.low
+        return np.asarray(self.high - self.low)
 
     @property
     def body_ratio(self) -> np.ndarray:
         r = self.range
-        return np.divide(self.body, r, out=np.zeros_like(r), where=r > 0)
+        return np.asarray(np.divide(self.body, r, out=np.zeros_like(r), where=r > 0))
 
     @property
     def is_bull(self) -> np.ndarray:
-        return self.close > self.open
+        return np.asarray(self.close > self.open)
 
     @property
     def hl2(self) -> np.ndarray:
-        return (self.high + self.low) / 2.0
+        return np.asarray((self.high + self.low) / 2.0)

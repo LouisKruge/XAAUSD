@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from xauusd.monitoring.logging import get_logger
 
@@ -55,7 +56,7 @@ class FredClient:
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def _get(self, path: str, params: dict[str, object]) -> dict:
+    def _get(self, path: str, params: dict[str, str | int]) -> dict:
         import httpx
 
         if not self.api_key:
@@ -69,7 +70,7 @@ class FredClient:
         self, series_id: str, start: datetime, end: datetime | None = None
     ) -> list[Observation]:
         """Latest values only, with a conservative estimated publication lag."""
-        params: dict[str, object] = {
+        params: dict[str, str | int] = {
             "series_id": series_id,
             "observation_start": start.date().isoformat(),
         }
@@ -91,7 +92,7 @@ class FredClient:
 
         This is the correct path and should be preferred whenever the key allows it.
         """
-        params: dict[str, object] = {
+        params: dict[str, str | int] = {
             "series_id": series_id,
             "observation_start": start.date().isoformat(),
             "realtime_start": start.date().isoformat(),
@@ -118,8 +119,12 @@ class FredClient:
         return out or self.fetch(series_id, start, end)
 
     def sync(
-        self, repo, series_ids: list[str], start: datetime, use_vintages: bool = True
-    ) -> dict[str, int]:  # type: ignore[no-untyped-def]
+        self,
+        repo: Any,
+        series_ids: list[str],
+        start: datetime,
+        use_vintages: bool = True,
+    ) -> dict[str, int]:
         """Fetch and persist. Returns per-series counts."""
         counts: dict[str, int] = {}
         for sid in series_ids:

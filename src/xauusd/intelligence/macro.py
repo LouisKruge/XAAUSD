@@ -176,7 +176,7 @@ def build_macro_inputs(repo, as_of: datetime, dxy: DxyState | None = None, lookb
     """
 
     def get(series_id: str) -> list[tuple[datetime, float]]:
-        return repo.series_as_of(series_id, as_of, lookback_days)
+        return list(repo.series_as_of(series_id, as_of, lookback_days))
 
     return MacroInputs(
         real10y=get("DFII10"),

@@ -421,13 +421,13 @@ def snapshot_payload(snap: MarketSnapshot) -> dict:
         ],
         "sr_levels": [
             {
-                "kind": str(l.kind),
-                "price": l.price,
-                "touches": l.touches,
-                "importance": l.importance,
-                "tf": str(l.timeframe),
+                "kind": str(lvl.kind),
+                "price": lvl.price,
+                "touches": lvl.touches,
+                "importance": lvl.importance,
+                "tf": str(lvl.timeframe),
             }
-            for l in snap.sr_levels
+            for lvl in snap.sr_levels
         ],
         "macro": {
             "bias": str(snap.macro.bias),

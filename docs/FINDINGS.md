@@ -179,3 +179,70 @@ is meant to be. The fix was to stop conflating two questions:
   snapshot directly. Fast, deterministic, and it tests the actual claim.
 - *Does real market data contain such setups?* → the backtester answers this, and its
   answer was 5 trades from 24,064 evaluations over 11 months.
+
+---
+
+## 14. A guard evaluated after the thing it guards against
+
+`compute()` in `backtesting/metrics.py` read:
+
+```python
+if rs.std(ddof=1) > 0 and len(rs) > 1:
+```
+
+Python evaluates left to right, so on a single-trade sample `std(ddof=1)` divides by
+zero *before* the `len(rs) > 1` test that exists to prevent exactly that. It returned
+`nan`, `nan > 0` was `False`, and the branch was skipped — so the output happened to be
+correct, and the only visible symptom was a `RuntimeWarning` buried in the test log.
+
+Correct output is not the same as correct code. The same guard written the other way
+round is free:
+
+```python
+if len(rs) > 1 and rs.std(ddof=1) > 0:
+```
+
+**Class of bug:** a short-circuit guard placed on the wrong side of the operator. Cheap
+to write, silent in production, and it only stays harmless while the accidental `nan`
+keeps comparing false. There is now a test that runs `compute()` on one trade with
+`RuntimeWarning` promoted to an error.
+
+---
+
+## 15. Three columns that lied about their own type
+
+`DecisionRow.gate_trace` was declared `Mapped[dict[str, Any]]`. It stores a **list** —
+its own column default is `list`, and the only writer is `d.gate_trace()`, which returns
+`list[dict[str, Any]]`. `reasons_for`, `reasons_against`, `all_blocking`,
+`approved_regimes` and `approved_sessions` were wrong the same way.
+
+Nothing broke, because JSON columns accept whatever they are handed and both the CLI and
+the dashboard iterate the value as a list. But the declared type was the opposite of the
+truth, and anyone trusting the model — reasonable, since the model is the schema — would
+write `row.gate_trace["something"]` and get a key error at runtime rather than a type
+error at check time. Iterating a `dict[str, Any]` yields `str` keys, which is precisely
+what mypy was complaining about in `cli.py`; the report pointed at the reader, but the
+defect was in the model.
+
+**Class of bug:** an annotation nobody rechecked after the value changed shape. Worth
+noting that this was found by clearing *unrelated* type noise — see below.
+
+---
+
+## 16. Why the noise mattered
+
+mypy reported 65 errors across the tree. Most were narrowing limitations and
+`warn_return_any` against numpy, and it would have been reasonable to call all 65
+cosmetic and move on. Finding 15 was one of those 65.
+
+The suppressions were the same story: seven `pytest.raises(Exception)` blocks sat around
+the risk-config validators — the tests whose entire job is proving the 1%/2% ceilings and
+the drawdown ordering are enforced. A blind `Exception` there passes just as happily on a
+typo'd keyword argument as on the validator firing, which means the test could have been
+asserting nothing at all. They now assert `ValidationError` specifically, and the
+idempotency test asserts `IntegrityError` rather than any exception.
+
+The tree is now clean under both `ruff` and `mypy`, with four ruff rules disabled
+explicitly and with reasons in `pyproject.toml` rather than by accretion. That is not
+tidiness for its own sake: a checker with 65 standing errors is a checker whose 66th —
+the real one — nobody sees.

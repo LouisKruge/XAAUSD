@@ -7,6 +7,7 @@ Two responsibilities that matter beyond CRUD:
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -172,7 +173,7 @@ class BarRepository:
         )
         step = timedelta(seconds=timeframe.seconds)
         gaps: list[tuple[datetime, datetime]] = []
-        for prev, nxt in zip(rows, rows[1:]):
+        for prev, nxt in itertools.pairwise(rows):
             p, n = _aware(prev), _aware(nxt)
             assert p and n
             if n - p > step * 1.5:

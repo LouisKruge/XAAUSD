@@ -15,6 +15,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from xauusd.domain.enums import Direction, ExitReason, OrderStatus, Timeframe
 from xauusd.domain.types import (
@@ -116,7 +117,7 @@ class SimBroker:
         self._positions: dict[int, SimPosition] = {}
         self._next_ticket = 1
         self._history: list[dict[str, object]] = []
-        self.closed_trades: list[dict[str, object]] = []
+        self.closed_trades: list[dict[str, Any]] = []
         self._bars_by_tf: dict[Timeframe, list[Bar]] = {}
         self.reject_next: int | None = None  # test hook: force a retcode
 

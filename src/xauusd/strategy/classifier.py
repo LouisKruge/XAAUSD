@@ -65,8 +65,10 @@ class Classifier:
         # Probability handling. When no model is available the system degrades to
         # score-only and caps at A, rather than either refusing to trade or pretending
         # to have a probability it does not have.
-        prob_available = probability is not None and model_healthy
-        if t.require_probability_model and not prob_available:
+        # Bound once, so "a probability we may use" is a single value rather than a
+        # flag that every later branch has to remember to pair with the value.
+        prob: float | None = probability if model_healthy else None
+        if t.require_probability_model and prob is None:
             return ClassificationResult(
                 Classification.NO_TRADE,
                 (),
@@ -120,12 +122,12 @@ class Classifier:
                 "OOS_PASSED or better",
             ),
         ]
-        if prob_available:
+        if prob is not None:
             checks_aplus.append(
                 GateResult(
                     "probability_a_plus",
-                    probability >= t.a_plus_probability_min,
-                    round(probability, 4),
+                    prob >= t.a_plus_probability_min,
+                    round(prob, 4),
                     t.a_plus_probability_min,
                 )
             )
@@ -185,12 +187,12 @@ class Classifier:
                 True,
             ),
         ]
-        if prob_available:
+        if prob is not None:
             checks_a.append(
                 GateResult(
                     "probability_a",
-                    probability >= t.a_probability_min,
-                    round(probability, 4),
+                    prob >= t.a_probability_min,
+                    round(prob, 4),
                     t.a_probability_min,
                 )
             )

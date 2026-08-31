@@ -112,8 +112,8 @@ def _resolve_with_m1(
     t1 = t0 + series.timeframe.seconds
     mask = (m1.ts >= t0) & (m1.ts < t1)
     idx = np.flatnonzero(mask)
-    for j in idx:
-        j = int(j)
+    for j_np in idx:
+        j = int(j_np)
         hi, lo = float(m1.high[j]), float(m1.low[j])
         s_hit = lo <= stop <= hi
         t_hit = lo <= target <= hi

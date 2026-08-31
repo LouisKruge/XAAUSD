@@ -25,7 +25,7 @@ from xauusd.core.fair_value_gap import FVGEngine
 from xauusd.core.support_resistance import SREngine, is_correct_side
 from xauusd.data.marketview import MarketView
 from xauusd.domain.enums import Direction, Regime, Session, Timeframe
-from xauusd.domain.types import FVG, MarketSnapshot, TradePlan
+from xauusd.domain.types import FVG, MarketSnapshot, Sweep, TradePlan
 from xauusd.strategy.base import StrategyMeta, build_targets, structural_stop
 
 SETUP_TF = Timeframe.M15
@@ -193,15 +193,15 @@ class SweepMssFvg:
         return max(candidates, key=lambda s: s.quality) if candidates else None
 
     @staticmethod
-    def _sweep_extreme(sweep, direction: Direction) -> float:  # type: ignore[no-untyped-def]
+    def _sweep_extreme(sweep: Sweep, direction: Direction) -> float:
         """The price the sweep reached — where the stop belongs, plus a buffer."""
         if direction is Direction.SHORT:
             return sweep.pool.price + sweep.penetration
         return sweep.pool.price - sweep.penetration
 
     def _entry_fvg(
-        self, snap: MarketSnapshot, direction: Direction, sweep, atr: float
-    ) -> FVG | None:  # type: ignore[no-untyped-def]
+        self, snap: MarketSnapshot, direction: Direction, sweep: Sweep, atr: float
+    ) -> FVG | None:
         """The best unfilled gap created by the displacement, after the sweep."""
         candidates = [
             f

@@ -18,10 +18,12 @@ Two things happen before the engine will trade at all:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from xauusd.config.settings import Settings, verify_live_arming
@@ -37,7 +39,7 @@ from xauusd.domain.enums import (
     Timeframe,
     ValidationStatus,
 )
-from xauusd.domain.types import MacroState, NewsState
+from xauusd.domain.types import MacroState, NewsState, SymbolSpec
 from xauusd.engine.pipeline import DecisionPipeline, EngineState, client_tag
 from xauusd.execution.broker import Broker, BrokerError
 from xauusd.execution.order_manager import OrderManager
@@ -66,7 +68,7 @@ class SingleInstanceLock:
     def __init__(self, db: Database) -> None:
         self.db = db
         self._held = False
-        self._file = None
+        self._file: Path | None = None
 
     def acquire(self) -> bool:
         if self.db.url.startswith("postgresql"):
@@ -81,7 +83,6 @@ class SingleInstanceLock:
 
         import atexit
         import os
-        from pathlib import Path
 
         path = Path("data/engine.lock")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,7 +156,7 @@ class TradingEngine:
         self.lock = SingleInstanceLock(db)
 
         self.symbol: str = settings.symbol
-        self.spec = None
+        self.spec: SymbolSpec | None = None
         self.spec_hash: str | None = None
         self.running = False
         self.trades_today = 0
@@ -276,10 +277,9 @@ class TradingEngine:
         self.running = True
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
+            # Windows has no add_signal_handler; the engine still stops via stop().
+            with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(sig, self.stop)
-            except NotImplementedError:
-                pass  # Windows
 
         await asyncio.gather(
             self._tick_loop(),
@@ -495,7 +495,7 @@ class TradingEngine:
             for p in positions
             if p.stop_loss
         )
-        return total / equity
+        return float(total / equity)
 
     def _strategy_status(self) -> dict[str, ValidationStatus]:
         try:
@@ -512,7 +512,7 @@ class TradingEngine:
             with self.db.session() as s:
                 repos = Repositories(s)
                 snap = result.snapshot
-                snap_id = repos.snapshots.save(
+                repos.snapshots.save(
                     ts=snap.ts,
                     symbol=snap.symbol,
                     regime=str(snap.regime),

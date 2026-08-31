@@ -251,11 +251,11 @@ class DecisionRow(Base):
     model_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     model_health: Mapped[str | None] = mapped_column(String(24), nullable=True)
     features: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
-    gate_trace: Mapped[dict[str, Any]] = mapped_column(JSONType, default=list)
+    gate_trace: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
     blocking_gate: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    all_blocking: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
-    reasons_for: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
-    reasons_against: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    all_blocking: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
+    reasons_for: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
+    reasons_against: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
     planned_entry: Mapped[float | None] = mapped_column(Price, nullable=True)
     planned_sl: Mapped[float | None] = mapped_column(Price, nullable=True)
     planned_tp1: Mapped[float | None] = mapped_column(Price, nullable=True)
@@ -529,8 +529,8 @@ class ValidationReportRow(Base):
     stress: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
     verdict: Mapped[str] = mapped_column(String(16))
     gate_results: Mapped[dict[str, Any]] = mapped_column(JSONType)
-    approved_regimes: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
-    approved_sessions: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    approved_regimes: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
+    approved_sessions: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
@@ -544,8 +544,8 @@ class StrategyStatusRow(Base):
     status: Mapped[str] = mapped_column(String(24), default="DEV")
     validation_report_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_class: Mapped[str] = mapped_column(String(16), default="A")
-    approved_regimes: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
-    approved_sessions: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    approved_regimes: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
+    approved_sessions: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

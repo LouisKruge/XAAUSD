@@ -102,9 +102,9 @@ def run(
         else:
             raise ValueError(f"unknown kind {kind}")
 
-        equity = _simulate_equity(sample, starting_equity, risk_pct)
+        equity = _simulate_equity(sample.tolist(), starting_equity, risk_pct)
         finals.append(equity[-1])
-        dds.append(max_drawdown(equity)[0])
+        dds.append(max_drawdown(equity.tolist())[0])
         expectancies.append(float(sample.mean()))
         wins = int((sample > 0.05).sum())
         decided = int((np.abs(sample) > 0.05).sum())

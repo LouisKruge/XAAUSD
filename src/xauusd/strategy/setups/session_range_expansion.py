@@ -84,7 +84,7 @@ class SessionRangeExpansion:
             if not st or not (st.last_mss or st.last_bos):
                 continue
             event = st.last_mss or st.last_bos
-            if event.direction is not direction:
+            if event is None or event.direction is not direction:
                 continue
 
             entry = price

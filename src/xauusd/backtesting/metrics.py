@@ -207,7 +207,9 @@ def compute(
     r_peak = np.maximum.accumulate(r_curve)
     m.max_drawdown_r = float(np.max(r_peak - r_curve))
 
-    if rs.std(ddof=1) > 0 and len(rs) > 1:
+    # len BEFORE std: std(ddof=1) on a single trade divides by zero and returns nan
+    # (with a RuntimeWarning) before the guard that exists to prevent exactly that.
+    if len(rs) > 1 and rs.std(ddof=1) > 0:
         # Per-trade Sharpe annualised by trade frequency, which is the honest version
         # for an irregular-frequency system.
         per_trade = rs.mean() / rs.std(ddof=1)

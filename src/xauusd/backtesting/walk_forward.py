@@ -70,14 +70,16 @@ class WalkForwardResult:
     @property
     def efficiency(self) -> float:
         """Aggregate: total OOS expectancy over total IS expectancy, trade-weighted."""
-        oos = [w for w in self.windows if w.oos_metrics and w.oos_metrics.trades]
-        ins = [w for w in self.windows if w.is_metrics and w.is_metrics.trades]
+        # Collect the metrics themselves, not the windows: a window whose metrics are
+        # absent has nothing to weight, and carrying the window forward loses that.
+        oos = [w.oos_metrics for w in self.windows if w.oos_metrics and w.oos_metrics.trades]
+        ins = [w.is_metrics for w in self.windows if w.is_metrics and w.is_metrics.trades]
         if not oos or not ins:
             return 0.0
-        oos_total = sum(w.oos_metrics.expectancy_r * w.oos_metrics.trades for w in oos)
-        oos_n = sum(w.oos_metrics.trades for w in oos)
-        is_total = sum(w.is_metrics.expectancy_r * w.is_metrics.trades for w in ins)
-        is_n = sum(w.is_metrics.trades for w in ins)
+        oos_total = sum(m.expectancy_r * m.trades for m in oos)
+        oos_n = sum(m.trades for m in oos)
+        is_total = sum(m.expectancy_r * m.trades for m in ins)
+        is_n = sum(m.trades for m in ins)
         if is_n == 0 or oos_n == 0:
             return 0.0
         is_avg = is_total / is_n

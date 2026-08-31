@@ -18,6 +18,7 @@ Three properties that matter more than the algorithm choice:
 
 from __future__ import annotations
 
+import contextlib
 import pickle
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -192,16 +193,16 @@ class ProbabilityModel:
             log.error("model_predict_error", error=str(exc))
             return None
         if self.calibrator is not None:
-            try:
+            # An unusable calibrator leaves the raw score in place rather than
+            # dropping the prediction; the score is still monotonic in the signal.
+            with contextlib.suppress(Exception):
                 raw = float(self.calibrator.predict([raw])[0])
-            except Exception:
-                pass
         return float(np.clip(raw, 0.001, 0.999))
 
     def _raw_predict(self, x: np.ndarray) -> np.ndarray:
         if hasattr(self.booster, "predict_proba"):
-            return self.booster.predict_proba(x)[:, 1]
-        return self.booster.predict(x)
+            return np.asarray(self.booster.predict_proba(x)[:, 1])
+        return np.asarray(self.booster.predict(x))
 
     def is_healthy(self) -> bool:
         return self._healthy and self.booster is not None
@@ -235,7 +236,7 @@ class ProbabilityModel:
         with Path(path).open("rb") as fh:
             d = pickle.load(fh)
         cal = d.get("calibration")
-        report = CalibrationReport(**{k: v for k, v in cal.items()}) if cal else None
+        report = CalibrationReport(**dict(cal)) if cal else None
         m = cls(
             d["model_id"], d["feature_names"], d["booster"], d["calibrator"], d["schema"], report
         )
@@ -274,7 +275,6 @@ def train(
 
     oof = np.full(n, np.nan)
     cv = PurgedKFold(n_splits, embargo_pct)
-    fitted: Any = None
 
     for train_idx, test_idx in cv.split(t0, t1):
         if len(np.unique(y[train_idx])) < 2:
@@ -282,7 +282,6 @@ def train(
         model = _make_model(monotone, seed)
         model.fit(X[train_idx], y[train_idx])
         oof[test_idx] = _proba(model, X[test_idx])
-        fitted = model
 
     mask = ~np.isnan(oof)
     if mask.sum() < 20:
@@ -308,7 +307,9 @@ def train(
 
     importance: dict[str, float] = {}
     if hasattr(final, "feature_importances_"):
-        importance = {n: float(v) for n, v in zip(feature_names, final.feature_importances_)}
+        importance = {
+            n: float(v) for n, v in zip(feature_names, final.feature_importances_, strict=True)
+        }
         importance = dict(sorted(importance.items(), key=lambda kv: -kv[1])[:20])
 
     meta = {
@@ -353,7 +354,8 @@ def _make_model(monotone: list[int], seed: int) -> Any:
 
 
 def _proba(model: Any, X: np.ndarray) -> np.ndarray:
-    return model.predict_proba(X)[:, 1] if hasattr(model, "predict_proba") else model.predict(X)
+    raw = model.predict_proba(X)[:, 1] if hasattr(model, "predict_proba") else model.predict(X)
+    return np.asarray(raw)
 
 
 class ModelHealthMonitor:
