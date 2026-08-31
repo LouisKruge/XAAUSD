@@ -357,8 +357,12 @@ class SimBroker:
                     price = min(price, bar.high)
                 else:
                     price = max(price, bar.low)
-                self._close(p, price, ExitReason.STOP_LOSS, self._bar_close_time(bar))
-                events.append({"ticket": p.ticket, "reason": "STOP_LOSS", "price": price})
+                # An exit at a MOVED stop is not a stop-out. Labelling every one
+                # STOP_LOSS makes the exit-reason breakdown useless and makes a
+                # profitable trailing exit look like a loss.
+                reason = self._stop_exit_reason(p)
+                self._close(p, price, reason, self._bar_close_time(bar))
+                events.append({"ticket": p.ticket, "reason": str(reason), "price": price})
             else:
                 # Limit-style TP fills at the level, no positive slippage assumed.
                 self._close(p, p.take_profit, ExitReason.TAKE_PROFIT, self._bar_close_time(bar))
@@ -377,6 +381,29 @@ class SimBroker:
     @staticmethod
     def _bar_close_time(bar: Bar) -> datetime:
         return bar.ts
+
+    @staticmethod
+    def _stop_exit_reason(p: SimPosition) -> ExitReason:
+        """Distinguish a real stop-out from a break-even or trailing exit.
+
+        The tolerance is risk-relative rather than exact equality: a break-even stop is
+        placed near the entry, and the entry itself sits on the far side of the spread,
+        so an exact comparison would never match and every trailing exit would be
+        mislabelled a stop-out.
+        """
+        moved = abs(p.stop_loss - p.initial_sl) > 1e-9
+        if not moved:
+            return ExitReason.STOP_LOSS
+        risk = abs(p.entry_price - p.initial_sl)
+        if risk <= 0:
+            return ExitReason.STOP_LOSS
+        beyond_entry_r = (p.stop_loss - p.entry_price) * p.direction.sign / risk
+        if beyond_entry_r > 0.10:
+            return ExitReason.TRAIL
+        if beyond_entry_r >= -0.10:
+            return ExitReason.BREAK_EVEN
+        # Moved, but still meaningfully behind entry: risk was reduced, then hit.
+        return ExitReason.STOP_LOSS
 
     @staticmethod
     def _touches(level: float, bar: Bar) -> bool:

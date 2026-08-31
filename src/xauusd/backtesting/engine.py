@@ -423,6 +423,7 @@ class BacktestEngine:
                     regime=Regime.RANGE,
                     score=d.score if d else None,
                     probability=d.probability if d else None,
+                    planned_rr_at_entry=(d.plan.rr if d and d.plan else 0.0),
                 )
             )
         return out

@@ -936,6 +936,7 @@ class ClosedTrade:
     score: float | None = None
     probability: float | None = None
     decision_id: int | None = None
+    planned_rr_at_entry: float = 0.0
 
     @property
     def net_pnl(self) -> float:
@@ -958,6 +959,17 @@ class ClosedTrade:
         return not self.is_win and not self.is_loss
 
     @property
-    def planned_rr(self) -> float:
+    def realised_rr(self) -> float:
+        """How far price actually travelled, in units of the initial risk.
+
+        NOT the planned RR — that is `planned_rr`, carried from the trade plan. The two
+        were previously conflated, which made `avg_rr_planned` in a validation report
+        show sub-1.0 values for a system with a hard 2.0 floor.
+        """
         d = abs(self.entry - self.initial_sl)
         return abs(self.exit_price - self.entry) / d if d > 0 else 0.0
+
+    @property
+    def planned_rr(self) -> float:
+        """The RR the plan targeted. Set at entry; 0.0 when unknown."""
+        return self.planned_rr_at_entry

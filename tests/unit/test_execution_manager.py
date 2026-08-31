@@ -17,6 +17,7 @@ from xauusd.config.settings import ExecutionConfig, Settings
 from xauusd.domain.enums import (
     Classification,
     Direction,
+    ExitReason,
     KillSwitchReason,
     OrderStatus,
     Timeframe,
@@ -474,3 +475,86 @@ class TestReconciler:
         result = rec.reconcile([])
         assert not result.clean
         assert ks.is_active(KillSwitchReason.BROKER_UNREACHABLE)
+
+
+class TestExitReasonLabelling:
+    """Regression: a 6-month backtest reported every exit as STOP_LOSS, including one
+    that closed at +1.03R. That makes the exit-reason breakdown useless and makes a
+    profitable trailing exit read as a stop-out."""
+
+    def _run(self, move_stop_to: float | None, hit_price: float):  # type: ignore[no-untyped-def]
+        from xauusd.domain.types import Bar, OrderRequest
+        from xauusd.execution.sim_broker import SimBroker, SimFillModel
+
+        b = SimBroker(
+            gold(),
+            10_000.0,
+            fill_model=SimFillModel(seed=1, slippage_points_mean=0, slippage_points_std=0),
+        )
+        b.set_time(T0, Bar(T0, 2000, 2001, 1999, 2000, spread_points=20))
+        b.send_market(
+            OrderRequest("XAUUSD", Direction.LONG, 0.10, 2000, 1990.0, 2040.0, "x", 1, "s:x")
+        )
+        if move_stop_to is not None:
+            t1 = T0 + timedelta(minutes=5)
+            b.set_time(t1, Bar(t1, 2000, 2020, 1999, 2018, spread_points=20))
+            b.modify_position(1, sl=move_stop_to)
+        t2 = T0 + timedelta(minutes=10)
+        b.step_bar(Bar(t2, 2018, 2019, min(hit_price, 1999), hit_price))
+        return b.closed_trades[0]
+
+    def test_unmoved_stop_is_a_stop_loss(self) -> None:
+        assert self._run(None, 1989.0)["exit_reason"] is ExitReason.STOP_LOSS
+
+    def test_break_even_stop_is_labelled_break_even(self) -> None:
+        assert self._run(2000.0, 1999.5)["exit_reason"] is ExitReason.BREAK_EVEN
+
+    def test_trailing_stop_hit_in_profit_is_labelled_trail(self) -> None:
+        t = self._run(2010.0, 2009.0)
+        assert t["exit_reason"] is ExitReason.TRAIL
+        assert t["gross_pnl"] > 0, "a profitable exit must not be labelled a stop-out"
+
+    def test_partially_tightened_stop_is_still_a_stop_loss(self) -> None:
+        assert self._run(1995.0, 1994.0)["exit_reason"] is ExitReason.STOP_LOSS
+
+
+class TestPlannedVersusRealisedRR:
+    """Regression: ClosedTrade.planned_rr computed the REALISED move, so a system with
+    a hard 2.0 RR floor reported 'planned RR 0.98' in its validation metrics."""
+
+    def _trade(self, exit_price: float, planned: float):  # type: ignore[no-untyped-def]
+        from xauusd.domain.enums import Regime, Session
+        from xauusd.domain.types import ClosedTrade
+
+        return ClosedTrade(
+            opened_at=T0,
+            closed_at=T0 + timedelta(hours=2),
+            symbol="XAUUSD",
+            direction=Direction.LONG,
+            strategy="s",
+            classification=Classification.A,
+            entry=2000.0,
+            initial_sl=1990.0,
+            exit_price=exit_price,
+            volume=0.1,
+            risk_money=100.0,
+            gross_pnl=(exit_price - 2000.0) * 10,
+            commission=0.0,
+            swap=0.0,
+            exit_reason=ExitReason.TRAIL,
+            session=Session.LONDON,
+            regime=Regime.RANGE,
+            planned_rr_at_entry=planned,
+        )
+
+    def test_planned_rr_comes_from_the_plan(self) -> None:
+        t = self._trade(exit_price=2009.8, planned=3.0)
+        assert t.planned_rr == 3.0
+
+    def test_realised_rr_is_the_distance_actually_travelled(self) -> None:
+        t = self._trade(exit_price=2009.8, planned=3.0)
+        assert t.realised_rr == pytest.approx(0.98)
+
+    def test_the_two_are_not_conflated(self) -> None:
+        t = self._trade(exit_price=2009.8, planned=3.0)
+        assert t.planned_rr != t.realised_rr

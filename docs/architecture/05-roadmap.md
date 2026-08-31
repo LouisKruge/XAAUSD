@@ -148,7 +148,8 @@ it was never fitted on:
 
 ```
 1.  ≥ 100 OOS trades                       (below this, nothing is measurable)
-2.  Wilson 95% LOWER BOUND of win rate ≥ 0.70     ← not the point estimate
+2a. OBSERVED win rate ≥ 0.70                      ← the brief's stated bar
+2b. Wilson 95% LOWER BOUND of win rate ≥ 0.60     ← evidence it is not a fluke
 3.  Profit factor ≥ 2.0
 4.  Expectancy ≥ +0.40R per trade
 5.  Max drawdown ≤ 15% at the configured risk

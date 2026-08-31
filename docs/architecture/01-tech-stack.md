@@ -101,3 +101,56 @@ is the integrity of its record. SQLite is supported for local unit tests only.
   MT5 terminal in a container is possible via Wine but is a reliability liability, not an asset.)
 - Backups: nightly `pg_dump` + Parquet lake snapshot to off-box storage. The decision journal is
   the asset; losing it means losing the ability to validate anything.
+
+---
+
+## Implementation deviations from this document
+
+Recorded here rather than left as a silent difference between plan and code. Each was
+a deliberate call made while building, with the reasoning.
+
+### 1. The MT5 bridge speaks length-prefixed JSON over TCP, not gRPC
+
+gRPC's value here was a typed contract and streaming. The typed contract is preserved by
+validating both ends against dataclasses; streaming is preserved by a subscribe frame.
+What is dropped is a protoc build step on a Windows VPS whose whole appeal is being easy
+to rebuild after a reinstall. The bridge carries a handful of calls per second over
+localhost, where gRPC's throughput advantage is irrelevant and its operational cost is
+not. The transport sits behind `BridgeTransport`, so swapping in gRPC later is one class.
+
+*Where:* `src/xauusd/execution/bridge_protocol.py`
+
+### 2. The dashboard is a no-build single-page app, not Vite + React + lightweight-charts
+
+Same reasoning, plus one more: a trading box should not depend on a CDN it may not reach
+when the network is degraded, and vendoring a chart library to avoid that costs more
+than the ~200 lines of hand-rolled SVG actually needed (an equity curve with a drawdown
+band, and horizontal bars). The API contract is unchanged, so a React front end can
+replace one file without touching the backend.
+
+*Where:* `src/xauusd/dashboard/static/`
+
+### 3. The long/short palette is teal/coral, not green/red
+
+Conventional trading green/red measures ΔE 4.1 under deuteranopia — effectively
+indistinguishable for roughly one man in twelve. The pair actually used
+(`#3fb6a8` / `#e8654f`) measures 11.8 and still reads as up/down. This was measured with
+a palette validator rather than eyeballed. Colour is never the only cue regardless:
+every direction carries a text label and every value carries a sign.
+
+### 4. LightGBM thread count is pinned
+
+LightGBM defaults to one thread per core, which under a cgroup CPU limit (a VPS, or CI)
+causes severe thread thrashing — measured at **42.7 seconds** for a 600-sample fit
+versus 0.02 seconds with `n_jobs=2`. Pinned deliberately, with the measurement recorded
+in the code so nobody "optimises" it back.
+
+*Where:* `src/xauusd/ml/model.py`
+
+### 5. Redis is optional, not required
+
+The architecture used Redis for the event bus, hot cache and distributed lock. As built,
+the single-instance lock uses a Postgres advisory lock (or a PID file on SQLite), and the
+dashboard hub is in-process. Redis remains the right answer when the dashboard and engine
+run on separate hosts, and the `Hub` interface is unchanged for that case — but requiring
+it for a single-operator single-box deployment was complexity without benefit.

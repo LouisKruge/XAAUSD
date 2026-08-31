@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv venv --python 3.11
+      - run: uv pip install -e ".[dev,ml,api]"
+
+      - name: Lint
+        run: .venv/bin/ruff check src tests
+
+      - name: Format check
+        run: .venv/bin/ruff format --check src tests
+
+      - name: Type check (risk and execution are the modules where bugs cost money)
+        run: .venv/bin/mypy src/xauusd/risk src/xauusd/execution src/xauusd/domain
+
+      - name: Unit tests
+        run: .venv/bin/pytest tests/unit -q --maxfail=1
+
+      - name: Coverage floor on risk and execution
+        run: |
+          .venv/bin/pytest tests/unit -q \
+            --cov=xauusd.risk --cov=xauusd.execution \
+            --cov-report=term-missing --cov-fail-under=80
+
+      - name: Migration applies cleanly
+        run: |
+          XAUUSD_DATABASE__URL=sqlite:///ci.db .venv/bin/alembic upgrade head
+          XAUUSD_DATABASE__URL=sqlite:///ci.db .venv/bin/alembic downgrade base
+
+      - name: Secret scan
+        run: |
+          if grep -rInE '(api[_-]?key|password|secret|token)\s*[:=]\s*["'"'"'][^"'"'"'{$]{8,}' \
+             src/ config/ --include='*.py' --include='*.yaml' | grep -v example; then
+            echo "possible hardcoded secret"; exit 1
+          fi
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv venv --python 3.11
+      - run: uv pip install -e ".[dev,ml,api]"
+
+      - name: End-to-end pipeline and backtest/live parity
+        # The parity test is the guard that keeps the backtest and live code paths
+        # from quietly drifting apart. If it fails, no validation number can be
+        # trusted until it is fixed.
+        run: .venv/bin/pytest tests/integration -q

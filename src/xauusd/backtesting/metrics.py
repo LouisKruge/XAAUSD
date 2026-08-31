@@ -96,8 +96,9 @@ class Metrics:
     total_pnl: float = 0.0
     avg_win_r: float = 0.0
     avg_loss_r: float = 0.0
-    avg_rr_realised: float = 0.0
-    avg_rr_planned: float = 0.0
+    avg_rr_realised: float = 0.0  # avg_win_r / avg_loss_r — the payoff ratio
+    avg_rr_planned: float = 0.0  # what the plans targeted, from the trade plan
+    avg_rr_travelled: float = 0.0  # how far price actually went, in initial-risk units
     max_drawdown_pct: float = 0.0
     max_drawdown_r: float = 0.0
     max_drawdown_duration_trades: int = 0
@@ -195,6 +196,8 @@ def compute(
     m.avg_rr_realised = m.avg_win_r / m.avg_loss_r if m.avg_loss_r > 0 else 0.0
     planned = [t.planned_rr for t in trades if t.planned_rr > 0]
     m.avg_rr_planned = float(np.mean(planned)) if planned else 0.0
+    travelled = [t.realised_rr for t in trades if t.realised_rr > 0]
+    m.avg_rr_travelled = float(np.mean(travelled)) if travelled else 0.0
 
     curve = list(equity_curve) if equity_curve else _equity_from_trades(trades, starting_equity)
     dd, peak_i, trough_i = max_drawdown(curve)
