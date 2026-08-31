@@ -73,7 +73,8 @@ def read_frame(sock: socket.socket) -> dict[str, Any]:
     (length,) = struct.unpack(">I", _recv_exact(sock, 4))
     if length > MAX_FRAME:
         raise FramingError(f"declared frame too large: {length}")
-    return json.loads(_recv_exact(sock, length).decode("utf-8"))
+    frame: dict[str, Any] = json.loads(_recv_exact(sock, length).decode("utf-8"))
+    return frame
 
 
 # Methods the bridge exposes. Anything not listed is rejected by the server, so a

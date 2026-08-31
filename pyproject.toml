@@ -46,6 +46,9 @@ ignore = ["E501", "B008", "RUF012"]
 
 [tool.mypy]
 python_version = "3.11"
+# Without this plugin mypy does not know pydantic fields have defaults, and reports
+# every RiskConfig() / Settings() construction as missing ~20 required arguments.
+plugins = ["pydantic.mypy"]
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

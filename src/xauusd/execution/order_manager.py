@@ -350,9 +350,10 @@ class OrderManager:
         finder = getattr(self.broker, "find_by_tag", None)
         if finder is not None:
             try:
-                return finder(client_tag)
+                found: BrokerPosition | None = finder(client_tag)
             except BrokerError:
                 return None
+            return found
         try:
             for p in self.broker.positions(magic=magic):
                 if client_tag and client_tag in (p.comment or ""):

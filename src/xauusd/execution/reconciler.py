@@ -149,10 +149,10 @@ class Reconciler:
 
         # --- field-level mismatches ---------------------------------------------------
         for ticket, pos in by_ticket.items():
-            row = db_by_ticket.get(ticket)
-            if row is None:
+            db_row = db_by_ticket.get(ticket)
+            if db_row is None:
                 continue
-            db_sl = float(row.get("current_sl") or 0)
+            db_sl = float(db_row.get("current_sl") or 0)
             if db_sl and pos.stop_loss and abs(db_sl - pos.stop_loss) > 1e-6:
                 # The broker wins. Our intent is restored only if it is TIGHTER.
                 tighter = db_sl > pos.stop_loss if pos.direction.sign > 0 else db_sl < pos.stop_loss
@@ -178,7 +178,7 @@ class Reconciler:
                         {"symbol": pos.symbol},
                     )
                 )
-            db_vol = float(row.get("remaining_volume") or row.get("volume") or 0)
+            db_vol = float(db_row.get("remaining_volume") or db_row.get("volume") or 0)
             if db_vol and abs(db_vol - pos.volume) > 1e-8:
                 result.divergences.append(
                     Divergence(
