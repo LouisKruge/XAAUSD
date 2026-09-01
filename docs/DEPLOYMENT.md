@@ -36,9 +36,10 @@ both keys into one. It stays a typed confirmation at the machine.
 
 Two honest caveats:
 
-- The Windows launchers are **written but not executed** — this repository was developed
-  on Linux, and no Windows machine was available to run them against. The Python they
-  call is tested; the `.bat` and `.vbs` wrappers around it are not. Expect to fix a path.
+- The Windows launchers are **confirmed working through Phase 1** on a real machine:
+  `Setup.bat` (including the no-Docker SQLite path), `make-shortcuts.ps1`, `start.vbs`,
+  the dashboard, and the System-tab jobs. Still unexercised: `stop.vbs`,
+  `Arm Live Trading.bat`, and the MT5 bridge path, since that needs a broker attached.
 - `Setup.bat` shows a console window while it runs, because it needs to report progress
   and errors somewhere. You do not type into it.
 

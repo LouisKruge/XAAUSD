@@ -384,15 +384,22 @@ point of a second key is that it travels a different channel from the first. A b
 a web UI reachable from a phone would collapse both keys into one, leaving the two-key
 arming as theatre. It stays a typed confirmation at the machine.
 
-**A note on what is and is not verified.** The Windows launchers (`Setup.bat`, the `.vbs`
-start/stop wrappers, the shortcut script) are written but never executed — development
-happened on Linux with no Windows machine available. This is why the fragile part of
-setup was moved *out* of batch and into `config/bootstrap.py`, which is tested: parsing
-`.env` with `findstr` to decide whether a key already has a value is both unreadable and
-untestable, and getting it wrong either destroys a working credential or generates a
-second one nothing reads. The batch file is now a thin caller of tested Python. The
-remaining untested surface is path handling, which is the part most likely to need a fix
-on first run — and it is documented as such rather than presented as working.
+**A note on what is and is not verified.** The Windows launchers were written on Linux
+with no Windows machine available, and shipped labelled as unexecuted. They have since
+been run: `Setup.bat` (on the no-Docker path), `make-shortcuts.ps1`, `start.vbs`, the
+dashboard and the System-tab jobs all worked first time, with the pre-flight check
+passing. `stop.vbs`, `Arm Live Trading.bat` and the MT5 bridge remain unexercised.
+
+Two things are worth keeping from that. First, the reason it worked is probably that the
+fragile part of setup was moved *out* of batch and into `config/bootstrap.py`, which is
+tested: parsing `.env` with `findstr` to decide whether a key already has a value is both
+unreadable and untestable, and getting it wrong either destroys a working credential or
+generates a second one nothing reads. What remained in batch was thin enough to get right
+by inspection.
+
+Second, shipping it labelled "not executed" cost nothing and was worth doing anyway. An
+untested component that works is indistinguishable, from the outside, from a tested one —
+right up until it doesn't.
 
 ---
 

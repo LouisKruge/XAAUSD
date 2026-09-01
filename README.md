@@ -32,7 +32,8 @@ deployment gate on out-of-sample data (`docs/architecture/05-roadmap.md`, Phase 
 **On Windows, without a terminal:** double-click `windows\Setup.bat` once, then use the
 three Desktop shortcuts it creates. The dashboard's **System** tab runs the pre-flight
 check, backtests and the validation gate as buttons. See `docs/DEPLOYMENT.md`. (The
-Windows launchers are written but were never executed — development was on Linux.)
+Windows path is confirmed working through Phase 1 — setup, shortcuts, dashboard and the
+System tab jobs; `stop.vbs` and live arming remain unexercised.)
 
 Otherwise:
 
