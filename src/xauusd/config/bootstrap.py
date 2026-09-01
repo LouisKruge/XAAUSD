@@ -84,10 +84,44 @@ def ensure_env_file(root: Path | str = ".") -> dict[str, str]:
             text += "\n"
         text += "\n".join(additions) + "\n"
 
+    # The generated Postgres password has to appear in TWO places: the variable compose
+    # reads, and the connection string the engine reads. Leaving the operator to copy it
+    # across by hand is a step that gets missed, and the failure is a connection refused
+    # at startup with nothing to say why.
+    text, wired = _wire_database_password(text)
+    if wired:
+        report["XAUUSD_DATABASE__URL"] = "database password filled in"
+
     if text and not text.endswith("\n"):
         text += "\n"
     env_path.write_text(text)
     return report
+
+
+DB_PLACEHOLDERS = ("CHANGEME", "xauusd:xauusd@")
+
+
+def _wire_database_password(text: str) -> tuple[str, bool]:
+    """Put the generated password into XAUUSD_DATABASE__URL, if it is still a placeholder.
+
+    Only placeholders are touched. A URL the operator has already edited — a different
+    host, a managed database, their own password — is left exactly as it is.
+    """
+    parsed = parse_env(text)
+    url = parsed.get("XAUUSD_DATABASE__URL", "")
+    password = parsed.get("POSTGRES_PASSWORD", "")
+    if not url or not password or not url.startswith("postgres"):
+        return text, False
+    if not any(ph in url for ph in DB_PLACEHOLDERS):
+        return text, False
+
+    new_url = url.replace("CHANGEME", password).replace("xauusd:xauusd@", f"xauusd:{password}@")
+    lines = text.splitlines()
+    out = [
+        f"XAUUSD_DATABASE__URL={new_url}" if ln.strip().startswith("XAUUSD_DATABASE__URL=") else ln
+        for ln in lines
+    ]
+    return "\n".join(out) + ("\n" if text.endswith("\n") else ""), True
 
 
 def main() -> int:

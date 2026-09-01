@@ -89,3 +89,50 @@ class TestGeneratesOnlyWhatIsMissing:
         write(tmp_path, ".env.example", "POSTGRES_PASSWORD=\n")
         ensure_env_file(tmp_path)
         assert (tmp_path / ".env").read_text().endswith("\n")
+
+
+class TestTheDatabasePasswordIsWiredThrough:
+    """The generated password must reach BOTH the compose variable and the connection
+    string. Leaving the operator to copy it across is a step that gets missed, and the
+    failure is a refused connection at startup with nothing explaining why."""
+
+    def test_the_placeholder_password_is_replaced(self, tmp_path: Path) -> None:
+        write(tmp_path, ".env.example", "")
+        write(
+            tmp_path,
+            ".env",
+            "POSTGRES_PASSWORD=\n"
+            "XAUUSD_DATABASE__URL=postgresql+psycopg://xauusd:CHANGEME@localhost:5432/xauusd\n",
+        )
+        ensure_env_file(tmp_path)
+        parsed = parse_env((tmp_path / ".env").read_text())
+        assert "CHANGEME" not in parsed["XAUUSD_DATABASE__URL"]
+        assert parsed["POSTGRES_PASSWORD"] in parsed["XAUUSD_DATABASE__URL"]
+
+    def test_the_compose_style_placeholder_is_replaced(self, tmp_path: Path) -> None:
+        write(tmp_path, ".env.example", "")
+        write(
+            tmp_path,
+            ".env",
+            "POSTGRES_PASSWORD=\n"
+            "XAUUSD_DATABASE__URL=postgresql+psycopg://xauusd:xauusd@localhost:5432/xauusd\n",
+        )
+        ensure_env_file(tmp_path)
+        parsed = parse_env((tmp_path / ".env").read_text())
+        assert parsed["POSTGRES_PASSWORD"] in parsed["XAUUSD_DATABASE__URL"]
+
+    def test_an_edited_url_is_left_alone(self, tmp_path: Path) -> None:
+        """Their own host, their own password, a managed database — none of it ours."""
+        url = "postgresql+psycopg://ops:their-own-secret@db.internal:5432/xauusd"
+        write(tmp_path, ".env.example", "")
+        write(tmp_path, ".env", f"POSTGRES_PASSWORD=generated\nXAUUSD_DATABASE__URL={url}\n")
+        ensure_env_file(tmp_path)
+        assert parse_env((tmp_path / ".env").read_text())["XAUUSD_DATABASE__URL"] == url
+
+    def test_a_sqlite_url_is_left_alone(self, tmp_path: Path) -> None:
+        write(tmp_path, ".env.example", "")
+        write(tmp_path, ".env", "POSTGRES_PASSWORD=\nXAUUSD_DATABASE__URL=sqlite:///data/x.db\n")
+        ensure_env_file(tmp_path)
+        assert parse_env((tmp_path / ".env").read_text())["XAUUSD_DATABASE__URL"] == (
+            "sqlite:///data/x.db"
+        )
