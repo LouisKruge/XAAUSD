@@ -177,13 +177,35 @@ def cmd_bridge(args: argparse.Namespace) -> int:
     from xauusd.execution.mt5_bridge import serve
 
     configure_logging("INFO", json_output=False, log_file="logs/bridge.log")
+
+    # Fall back to the configured broker for anything not given on the command line.
+    # Without this the four XAUUSD_BROKER__* values that .env.example asks for were read
+    # by nothing: the bridge is launched with no flags, so it silently ignored the
+    # credentials and worked only because MT5 happened to be logged in already.
+    b = load_settings(env=args.env).broker
+    login = args.login if args.login is not None else b.login
+    password = args.password if args.password is not None else b.password
+    server = args.server if args.server is not None else b.server
+    terminal_path = args.terminal_path if args.terminal_path is not None else b.terminal_path
+
+    if login:
+        log.info("bridge_credentials", source="config", login=login, server=server or "(default)")
+    else:
+        # Not an error: mt5.initialize() attaches to whatever session the terminal has
+        # open. Worth saying out loud, because "connected to the wrong account" is a
+        # much worse discovery later.
+        log.warning(
+            "bridge_no_login_configured",
+            detail="attaching to the account already open in the MT5 terminal",
+        )
+
     serve(
         host=args.host,
         port=args.port,
-        terminal_path=args.terminal_path,
-        login=args.login,
-        password=args.password,
-        server=args.server,
+        terminal_path=terminal_path,
+        login=login,
+        password=password,
+        server=server,
     )
     return 0
 

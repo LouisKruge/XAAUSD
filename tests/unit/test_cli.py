@@ -63,3 +63,61 @@ class TestABadConfigExplainsItself:
         err = capsys.readouterr().err
         assert "configuration is invalid" in err
         assert "risk" in err
+
+
+class TestTheBridgeReadsTheConfiguredAccount:
+    """.env.example asks for XAUUSD_BROKER__LOGIN / PASSWORD / SERVER / TERMINAL_PATH.
+
+    The bridge is launched with no flags by the Start shortcut, so if it only read
+    argparse defaults those four values reached nothing — and it would still appear to
+    work, by attaching to whichever account the terminal happened to have open. That is
+    the worst possible version of "connected": plausible, and potentially the wrong
+    account.
+    """
+
+    def test_credentials_come_from_config_when_no_flags_are_given(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.setenv("XAUUSD_BROKER__LOGIN", "12345678")
+        monkeypatch.setenv("XAUUSD_BROKER__PASSWORD", "s3cret")
+        monkeypatch.setenv("XAUUSD_BROKER__SERVER", "ICMarketsSC-Demo")
+        monkeypatch.setenv("XAUUSD_BROKER__TERMINAL_PATH", r"C:\MT5\terminal64.exe")
+
+        seen: dict[str, object] = {}
+        import xauusd.execution.mt5_bridge as bridge
+
+        monkeypatch.setattr(bridge, "serve", lambda **kw: seen.update(kw))
+
+        from xauusd.cli import main
+
+        main(["bridge"])
+        assert seen["login"] == 12345678
+        assert seen["password"] == "s3cret"
+        assert seen["server"] == "ICMarketsSC-Demo"
+        assert seen["terminal_path"] == r"C:\MT5\terminal64.exe"
+
+    def test_an_explicit_flag_still_wins(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.setenv("XAUUSD_BROKER__LOGIN", "11111111")
+        seen: dict[str, object] = {}
+        import xauusd.execution.mt5_bridge as bridge
+
+        monkeypatch.setattr(bridge, "serve", lambda **kw: seen.update(kw))
+
+        from xauusd.cli import main
+
+        main(["bridge", "--login", "22222222"])
+        assert seen["login"] == 22222222
+
+    def test_no_configured_login_is_allowed_but_announced(self, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+        """Attaching to the terminal's open session is legitimate — it just must not be
+        silent, because 'connected to the wrong account' is a bad thing to discover late."""
+        monkeypatch.delenv("XAUUSD_BROKER__LOGIN", raising=False)
+        seen: dict[str, object] = {}
+        import xauusd.execution.mt5_bridge as bridge
+
+        monkeypatch.setattr(bridge, "serve", lambda **kw: seen.update(kw))
+
+        from xauusd.cli import main
+
+        assert main(["bridge"]) == 0
+        assert seen["login"] is None
+        combined = capsys.readouterr()
+        assert "bridge_no_login_configured" in (combined.out + combined.err)

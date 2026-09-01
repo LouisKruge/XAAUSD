@@ -393,3 +393,35 @@ untestable, and getting it wrong either destroys a working credential or generat
 second one nothing reads. The batch file is now a thin caller of tested Python. The
 remaining untested surface is path handling, which is the part most likely to need a fix
 on first run — and it is documented as such rather than presented as working.
+
+---
+
+## 21. The bridge ignored the credentials the setup file asks for
+
+`.env.example` asks the operator for `XAUUSD_BROKER__LOGIN`, `__PASSWORD`, `__SERVER`
+and `__TERMINAL_PATH`. `cmd_bridge` read none of them:
+
+```python
+serve(host=args.host, port=args.port, terminal_path=args.terminal_path,
+      login=args.login, password=args.password, server=args.server)
+```
+
+Those argparse defaults are all `None`, and the Start shortcut launches the bridge with
+no flags. So all four configured values reached nothing.
+
+What makes this worse than an inert setting is that it still appears to work.
+`mt5.initialize()` with no login attaches to whatever session the terminal already has
+open, so the bridge connects, `doctor` prints an account, and everything looks correct —
+possibly against a different account than the one configured. "Connected, plausibly, to
+the wrong account" is a considerably worse failure than "not connected".
+
+The bridge now falls back to the configured broker for anything not passed as a flag,
+and says which it used. Attaching to the terminal's open session is still allowed — it
+is the normal case for a manually-logged-in terminal — but it is now announced rather
+than assumed.
+
+**Class of bug:** the same one as finding 19, in a different place. A setting the
+documentation asks for, read by nothing. Both were found by tracing what a documented
+instruction actually reaches rather than by testing whether the code does what it says.
+Worth doing for every value in `.env.example`: who reads this, and what happens if
+nobody does?
