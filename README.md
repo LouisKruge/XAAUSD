@@ -18,7 +18,7 @@ routes only `A` / `A+` decisions to an execution layer guarded by hard risk inva
 | | |
 |---|---|
 | **Phases complete** | 1–12 (foundation → dashboard) |
-| **Tests** | 316 unit + 53 integration, including a backtest/live parity gate |
+| **Tests** | 342 unit + 74 integration, including a backtest/live parity gate |
 | **`LIVE_TRADING`** | `false`, and requires two-key arming to change |
 | **Next** | Phase 13 (paper → demo, ≥4 weeks) and Phase 14 (small live) — both are wall-clock work that cannot be compressed |
 
@@ -28,6 +28,13 @@ deployment gate on out-of-sample data (`docs/architecture/05-roadmap.md`, Phase 
 ---
 
 ## Quick start
+
+**On Windows, without a terminal:** double-click `windows\Setup.bat` once, then use the
+three Desktop shortcuts it creates. The dashboard's **System** tab runs the pre-flight
+check, backtests and the validation gate as buttons. See `docs/DEPLOYMENT.md`. (The
+Windows launchers are written but were never executed — development was on Linux.)
+
+Otherwise:
 
 ```bash
 uv venv --python 3.11 && uv pip install -e ".[dev,ml,api]"

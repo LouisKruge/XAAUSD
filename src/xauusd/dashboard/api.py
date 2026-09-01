@@ -34,6 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from xauusd.config.settings import Settings, load_settings
+from xauusd.dashboard.jobs import JobAlreadyRunning, UnknownJob, runner
 from xauusd.database.repositories import Repositories
 from xauusd.database.session import Database
 from xauusd.monitoring.logging import get_logger
@@ -460,6 +461,53 @@ async def flatten(req: CommandRequest) -> dict[str, Any]:
     cmd = _queue("FLATTEN", req)
     await hub.broadcast("command", cmd)
     return cmd
+
+
+# --------------------------------------------------------------------------------------
+# Operations that used to require a terminal
+# --------------------------------------------------------------------------------------
+
+
+class JobRequest(BaseModel):
+    """Only the job key and integer parameters. No command, no path, no free text."""
+
+    key: str
+    params: dict[str, int] = {}
+
+
+@app.get("/api/jobs/catalogue")
+async def job_catalogue() -> list[dict[str, Any]]:
+    return runner.catalogue()
+
+
+@app.get("/api/jobs")
+async def job_list() -> dict[str, Any]:
+    return {"busy": runner.busy, "jobs": runner.recent()}
+
+
+@app.get("/api/jobs/{job_id}")
+async def job_detail(job_id: int) -> dict[str, Any]:
+    job = runner.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="no such job")
+    return job.as_dict()
+
+
+@app.post("/api/jobs")
+async def job_start(req: JobRequest) -> dict[str, Any]:
+    try:
+        job = runner.start(req.key, req.params)
+    except UnknownJob:
+        raise HTTPException(status_code=400, detail=f"unknown job {req.key!r}") from None
+    except JobAlreadyRunning as exc:
+        # 409, not 500: the operator asked for something reasonable at a busy moment.
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return job.as_dict(include_output=False)
+
+
+@app.post("/api/jobs/cancel")
+async def job_cancel() -> dict[str, bool]:
+    return {"cancelled": runner.cancel()}
 
 
 @app.get("/api/commands")

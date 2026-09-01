@@ -28,6 +28,7 @@
     <button data-tab="decisions">Decisions</button>
     <button data-tab="rejections">Rejection ledger</button>
     <button data-tab="performance">Performance</button>
+    <button data-tab="system">System</button>
   </nav>
 
   <main>
@@ -153,6 +154,30 @@
         </div>
       </div>
     </section>
+    <!-- ================= SYSTEM ================= -->
+    <section class="view" id="view-system">
+      <div class="panel" style="margin-bottom:12px">
+        <h2>Operations <span class="sub">everything that used to need a command line</span></h2>
+        <div class="body">
+          <div id="job-catalogue" class="job-grid"></div>
+          <div id="job-busy" style="color:var(--ink-3);font-size:12px;margin-top:10px"></div>
+        </div>
+      </div>
+
+      <div class="grid g21">
+        <div class="panel">
+          <h2>Output <span class="sub" id="job-current-title">nothing running</span></h2>
+          <div class="body">
+            <pre id="job-output" class="job-output">Pick an operation above.</pre>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Recent runs</h2>
+          <div class="body"><div id="job-history"></div></div>
+        </div>
+      </div>
+    </section>
+
   </main>
 </div>
 <script src="/assets/terminal.js"></script>

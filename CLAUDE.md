@@ -40,7 +40,8 @@ src/xauusd/
   backtesting/  engine, metrics, walk-forward, Monte Carlo, deployment gate
   ml/           triple-barrier labelling, purged CV, calibrated probability model
   engine/       decision pipeline and the live orchestrator
-  dashboard/    FastAPI backend + no-build single-page terminal
+  dashboard/    FastAPI backend + no-build single-page terminal; jobs.py runs the
+                allowlisted CLI operations so the terminal is never required
 ```
 
 ## Commands

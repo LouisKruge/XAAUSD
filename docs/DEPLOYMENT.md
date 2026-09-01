@@ -6,6 +6,46 @@ cannot.
 
 ---
 
+## If you would rather not use a command line
+
+Everything below has a click-driven equivalent on Windows. You need a terminal for
+none of it.
+
+**Once**, double-click `windows\Setup.bat`. It installs the Python environment, starts
+the datastores, builds the schema, generates a dashboard token and a database password,
+and puts three shortcuts on your Desktop. It is safe to run twice — every step checks
+before it acts, and it never overwrites a secret that already has a value.
+
+**After that**, three Desktop icons:
+
+| Icon | What it does |
+|---|---|
+| **Start XAUUSD Bot** | Starts the bridge, the engine and the dashboard, then opens the dashboard. No console windows. |
+| **Stop XAUUSD Bot** | Stops those three. Open positions are left alone — flatten them from the dashboard first if that is what you meant. |
+| **Arm Live Trading** | Key 2 of the live arming. Deliberately a console prompt, see below. |
+
+**Everything else is in the dashboard.** Its **System** tab runs the pre-flight check,
+a backtest, and the validation gate as buttons, streaming the same output the terminal
+would have shown. Decisions, the rejection ledger, performance, halt and flatten already
+had their own tabs.
+
+The one thing deliberately *not* in the dashboard is live arming. It is key 2 of a
+two-key design, and the whole point of a second key is that it travels a different
+channel from the first. A button in a web UI you can reach from your phone would collapse
+both keys into one. It stays a typed confirmation at the machine.
+
+Two honest caveats:
+
+- The Windows launchers are **written but not executed** — this repository was developed
+  on Linux, and no Windows machine was available to run them against. The Python they
+  call is tested; the `.bat` and `.vbs` wrappers around it are not. Expect to fix a path.
+- `Setup.bat` shows a console window while it runs, because it needs to report progress
+  and errors somewhere. You do not type into it.
+
+The sections below give the equivalent commands, which are what the buttons run.
+
+---
+
 ## 0. Prerequisites
 
 | | |

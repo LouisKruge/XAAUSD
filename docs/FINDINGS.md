@@ -349,3 +349,47 @@ the loader tells you what the library does with what you hand it.
 A related note: because the YAML layer is process-global (pydantic-settings builds its
 sources from the class, not the call), `load_settings` restores the previous layer in a
 `finally`. There is a test asserting the layer does not outlive its call.
+
+---
+
+## 20. Operations that assumed an operator who likes terminals
+
+Every operational path in this system ran through the CLI: setup, starting the three
+processes, the pre-flight check, backtests, and the validation gate. That was never a
+stated requirement — it was an assumption inherited from the fact that the system was
+built by someone typing commands.
+
+It matters more here than in most projects. The gate that decides whether a strategy may
+ever touch real money is `xauusd validate`. If running it means opening a terminal, the
+temptation is to skip it and trust the backtest already run — which is precisely the
+failure the gate exists to prevent. A control that is inconvenient to exercise is a
+control that gets skipped.
+
+Three of those moved into the dashboard's System tab as background jobs with streamed
+output. Two constraints shaped the implementation, both because this starts processes on
+behalf of a network request:
+
+- **The job list is a closed allowlist.** A caller names a job from a fixed set. There is
+  no path by which a request supplies a command, an argument name, or a path.
+- **Parameters are integers with stated bounds**, clamped and passed as separate argv
+  entries with `shell=False`. A string cannot become an argv entry at all — the schema
+  rejects it before the runner sees it, and the runner would fall back to the default
+  anyway. There are tests for `"; rm -rf /"` and `"$(whoami)"` as parameter values.
+
+Jobs are serialised, because two heavy runs competing for the same cores makes both
+slower and the machine unresponsive.
+
+**What deliberately did NOT move:** live arming. It is key 2 of a two-key design, and the
+point of a second key is that it travels a different channel from the first. A button in
+a web UI reachable from a phone would collapse both keys into one, leaving the two-key
+arming as theatre. It stays a typed confirmation at the machine.
+
+**A note on what is and is not verified.** The Windows launchers (`Setup.bat`, the `.vbs`
+start/stop wrappers, the shortcut script) are written but never executed — development
+happened on Linux with no Windows machine available. This is why the fragile part of
+setup was moved *out* of batch and into `config/bootstrap.py`, which is tested: parsing
+`.env` with `findstr` to decide whether a key already has a value is both unreadable and
+untestable, and getting it wrong either destroys a working credential or generates a
+second one nothing reads. The batch file is now a thin caller of tested Python. The
+remaining untested surface is path handling, which is the part most likely to need a fix
+on first run — and it is documented as such rather than presented as working.

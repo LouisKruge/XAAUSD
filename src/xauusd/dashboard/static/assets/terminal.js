@@ -516,6 +516,10 @@ function switchTab(name) {
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
   if (name === 'performance' && !state.performance) refreshPerformance();
   if (name === 'rejections') refreshRejections();
+  if (name === 'system') {
+    if (!jobs.catalogue.length) loadJobCatalogue();
+    refreshJobHistory();
+  }
 }
 
 /** Show a failure in the panel rather than leaving it blank.
@@ -613,6 +617,115 @@ async function sendCommand(name) {
   const cmd = await r.json();
   alert(`${name} queued as #${cmd.id}. The engine executes it on its next poll; the `
       + `dashboard never touches the broker directly.`);
+}
+
+// ---------------------------------------------------------------------------
+// System tab: the operations that used to need a command line.
+// ---------------------------------------------------------------------------
+
+const jobs = { catalogue: [], watching: null, timer: null };
+
+function esc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function loadJobCatalogue() {
+  try {
+    jobs.catalogue = await api('/api/jobs/catalogue');
+  } catch (e) {
+    panelError('#job-catalogue', e);
+    return;
+  }
+  $('#job-catalogue').innerHTML = jobs.catalogue.map((j) => `
+    <div class="job-card">
+      <h3>${esc(j.title)}</h3>
+      <p>${esc(j.description)}</p>
+      <div class="params">
+        ${Object.entries(j.params || {}).map(([name, p]) => `
+          <label>${esc(name)}
+            <input type="number" data-job="${esc(j.key)}" data-param="${esc(name)}"
+                   value="${esc(p.default)}" min="${esc(p.min)}" max="${esc(p.max)}">
+          </label>`).join('')}
+      </div>
+      <button class="btn" data-run="${esc(j.key)}">Run</button>
+    </div>`).join('');
+
+  $$('#job-catalogue button[data-run]').forEach((b) =>
+    b.addEventListener('click', () => startJob(b.dataset.run)));
+}
+
+async function startJob(key) {
+  const params = {};
+  $$(`#job-catalogue input[data-job="${key}"]`).forEach((i) => {
+    params[i.dataset.param] = Number(i.value);
+  });
+
+  const r = await fetch('/api/jobs', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ key, params }),
+  });
+  if (r.status === 409) {
+    // Something else is already running; say which rather than failing silently.
+    const d = await r.json().catch(() => ({}));
+    $('#job-busy').textContent = d.detail || 'another operation is already running';
+    return;
+  }
+  if (!r.ok) {
+    $('#job-busy').textContent = `could not start (${r.status})`;
+    return;
+  }
+  const job = await r.json();
+  jobs.watching = job.id;
+  $('#job-busy').textContent = '';
+  $('#job-output').textContent = 'starting…';
+  pollJob();
+}
+
+async function pollJob() {
+  clearTimeout(jobs.timer);
+  if (jobs.watching == null) return;
+  let job;
+  try {
+    job = await api(`/api/jobs/${jobs.watching}`);
+  } catch (e) {
+    panelError('#job-history', e);
+    return;
+  }
+
+  $('#job-current-title').textContent =
+    `${job.title} — ${job.status}` + (job.exit_code != null ? ` (exit ${job.exit_code})` : '');
+  // textContent, not innerHTML: this is program output, not markup.
+  $('#job-output').textContent = (job.output || []).join('\n') || '(no output yet)';
+  const pre = $('#job-output');
+  pre.scrollTop = pre.scrollHeight;
+
+  refreshJobHistory();
+  if (job.running) jobs.timer = setTimeout(pollJob, 1500);
+}
+
+async function refreshJobHistory() {
+  let data;
+  try {
+    data = await api('/api/jobs');
+  } catch (e) {
+    return;
+  }
+  $('#job-busy').textContent = data.busy ? 'an operation is running' : '';
+  $('#job-history').innerHTML = data.jobs.length
+    ? data.jobs.map((j) => `
+        <div class="job-row" data-open="${esc(j.id)}">
+          <span>${esc(j.title)}</span>
+          <span>
+            <span class="when">${esc((j.started_at || '').replace('T', ' ').slice(0, 19))}</span>
+            <span class="job-status ${esc(j.status)}">${esc(j.status)}</span>
+          </span>
+        </div>`).join('')
+    : '<div class="empty">Nothing has been run yet.</div>';
+
+  $$('#job-history .job-row').forEach((row) =>
+    row.addEventListener('click', () => { jobs.watching = Number(row.dataset.open); pollJob(); }));
 }
 
 function init() {
