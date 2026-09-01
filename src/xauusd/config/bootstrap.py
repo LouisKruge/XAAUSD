@@ -137,6 +137,74 @@ def _wire_database_password(text: str) -> tuple[str, bool]:
     return "\n".join(out) + ("\n" if text.endswith("\n") else ""), True
 
 
+def _is_our_generated_postgres_url(url: str) -> bool:
+    """Did WE write this URL, or did the operator?
+
+    Only a URL matching the template setup generates is ever rewritten. A different
+    host, port or database name means someone made a decision, and that decision
+    outranks our guess about what is convenient.
+    """
+    return url.startswith("postgresql+psycopg://xauusd:") and url.endswith("@localhost:5432/xauusd")
+
+
+def check_database(root: Path | str = ".") -> tuple[bool, str]:
+    """Verify the configured database is reachable before anything tries to use it.
+
+    A stale PostgreSQL URL is the likely failure here: earlier versions of setup wrote
+    one unconditionally, and it sat harmless for as long as nothing read `.env`. Once
+    `.env` was actually being read that line came alive and pointed at a database the
+    machine never had — surfacing as a SQLAlchemy traceback at the schema step, which
+    tells an operator nothing they can act on.
+
+    When the unreachable URL is one we generated, comment it out and carry on: the
+    config files already name a working local database. The line is preserved as a
+    comment so the change is visible and reversible.
+    """
+    from sqlalchemy import create_engine, text
+
+    from xauusd.config.settings import load_settings
+
+    root = Path(root)
+    settings = load_settings()
+    url = settings.database.url
+
+    try:
+        engine = create_engine(
+            url, connect_args={"connect_timeout": 5} if "postgres" in url else {}
+        )
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True, f"reachable ({url.split('@')[-1] if '@' in url else url})"
+    except Exception as exc:
+        reason = f"{type(exc).__name__}"
+
+    env_path = root / ".env"
+    if not url.startswith("postgres") or not env_path.exists():
+        return False, f"{url} is not reachable ({reason})"
+
+    text_before = env_path.read_text(encoding="utf-8", errors="replace")
+    configured = parse_env(text_before).get("XAUUSD_DATABASE__URL", "")
+    if not _is_our_generated_postgres_url(configured):
+        return False, (
+            f"{url} is not reachable ({reason}). That URL was set by hand, so it has "
+            "been left alone — start that database, or edit XAUUSD_DATABASE__URL in .env."
+        )
+
+    lines = text_before.splitlines()
+    out = [
+        f"# disabled by setup: PostgreSQL was not reachable\n# {ln}"
+        if ln.strip().startswith("XAUUSD_DATABASE__URL=")
+        else ln
+        for ln in lines
+    ]
+    env_path.write_text("\n".join(out) + "\n")
+    return True, (
+        "PostgreSQL was not reachable, so the generated XAUUSD_DATABASE__URL has been "
+        "commented out in .env; the local database file will be used instead. "
+        "Start Docker Desktop and re-run setup to go back to PostgreSQL."
+    )
+
+
 def main() -> int:
     import argparse
 
@@ -146,7 +214,18 @@ def main() -> int:
         action="store_true",
         help="PostgreSQL is running; point the database URL at it",
     )
+    ap.add_argument(
+        "--check-database",
+        action="store_true",
+        help="verify the configured database is reachable, and repair a stale URL",
+    )
     args = ap.parse_args()
+
+    if args.check_database:
+        ok, detail = check_database(Path.cwd())
+        print(f"   database: {detail}")
+        return 0 if ok else 1
+
     report = ensure_env_file(Path.cwd(), postgres=args.postgres)
     for key, what in report.items():
         # Never print the values themselves — this runs in a console window that may be

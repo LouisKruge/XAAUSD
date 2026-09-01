@@ -79,6 +79,18 @@ call .venv\Scripts\python.exe -m xauusd.config.bootstrap !USE_PG!
 if errorlevel 1 ( echo   [X] Could not prepare .env & pause & exit /b 1 )
 
 REM ----------------------------------------------------------------- Schema ---
+REM Check the database answers BEFORE alembic touches it. Otherwise an unreachable
+REM URL surfaces as a SQLAlchemy traceback, which tells the operator nothing they
+REM can act on. This also repairs a stale PostgreSQL URL left by an older setup.
+echo   [..] Checking the database
+call .venv\Scripts\python.exe -m xauusd.config.bootstrap --check-database
+if errorlevel 1 (
+  echo   [X] The configured database is not reachable. See the line above.
+  echo       If you meant to use PostgreSQL, start Docker Desktop and run this again.
+  pause
+  exit /b 1
+)
+
 echo   [..] Building the database schema
 call .venv\Scripts\python.exe -m alembic upgrade head
 if errorlevel 1 (

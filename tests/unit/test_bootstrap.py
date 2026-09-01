@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from xauusd.config.bootstrap import ensure_env_file, parse_env
+from xauusd.config.bootstrap import check_database, ensure_env_file, parse_env
 
 
 def write(root: Path, name: str, text: str) -> None:
@@ -140,3 +140,45 @@ class TestTheDatabaseUrlFollowsWhatIsActuallyRunning:
         assert parse_env((tmp_path / ".env").read_text())["XAUUSD_DATABASE__URL"] == (
             "sqlite:///data/x.db"
         )
+
+
+class TestTheDatabaseIsCheckedBeforeItIsUsed:
+    """An unreachable database surfaced as a SQLAlchemy traceback at the schema step.
+
+    The specific trap: earlier setup versions wrote a PostgreSQL URL into .env
+    unconditionally. It sat harmless while nothing read .env — and came alive the moment
+    that was fixed, pointing at a database the machine never had.
+    """
+
+    def test_a_reachable_database_passes(self, tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config").mkdir()
+        (tmp_path / ".env").write_text(f"XAUUSD_DATABASE__URL=sqlite:///{tmp_path}/ok.db\n")
+        ok, detail = check_database(tmp_path)
+        assert ok, detail
+
+    def test_a_stale_generated_url_is_commented_out(self, tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config").mkdir()
+        url = "postgresql+psycopg://xauusd:generated-pw@localhost:5432/xauusd"
+        (tmp_path / ".env").write_text(f"XAUUSD_DATABASE__URL={url}\n")
+
+        ok, detail = check_database(tmp_path)
+        assert ok, "a URL we generated ourselves should be repaired, not fatal"
+        assert "commented out" in detail
+
+        text = (tmp_path / ".env").read_text()
+        assert f"# XAUUSD_DATABASE__URL={url}" in text, "the old value must stay visible"
+        assert parse_env(text).get("XAUUSD_DATABASE__URL") is None
+
+    def test_a_hand_written_url_is_never_touched(self, tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """A different host means someone made a decision, and it outranks our guess."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config").mkdir()
+        url = "postgresql+psycopg://ops:secret@db.internal:5432/trading"
+        (tmp_path / ".env").write_text(f"XAUUSD_DATABASE__URL={url}\n")
+
+        ok, detail = check_database(tmp_path)
+        assert not ok, "we must not silently discard an operator's own database"
+        assert "left alone" in detail
+        assert parse_env((tmp_path / ".env").read_text())["XAUUSD_DATABASE__URL"] == url

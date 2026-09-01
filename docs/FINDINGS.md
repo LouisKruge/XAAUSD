@@ -512,3 +512,44 @@ file, a refused connection, a malformed value — all announce themselves. A sou
 is silently never consulted produces a system that runs perfectly on the wrong settings.
 Worth asking of any config mechanism: if this input were ignored entirely, what would I
 see? If the answer is "a normal-looking startup", something has to say otherwise.
+
+---
+
+## 24. Fixing finding 23 detonated a mine that finding 22 had already identified
+
+Setup failed at the schema step with a psycopg connection timeout to localhost:5432 — on
+a machine with no PostgreSQL, which the operator had been told they did not need.
+
+The chain:
+
+1. An early version of `bootstrap` wrote `XAUUSD_DATABASE__URL=postgresql+psycopg://...`
+   into `.env` unconditionally.
+2. Nothing read `.env` (finding 23), so that line was inert. Everything worked.
+3. Finding 22 removed the placeholder from `.env.example` and made setup write a
+   PostgreSQL URL only when it had actually started PostgreSQL — but only for `.env`
+   files created *after* that change. An `.env` already on disk still had the line.
+4. Finding 23 made `.env` actually load. The dormant line came alive.
+
+Finding 22 closed with: *"Worth asking after any change to resolution order: what was
+previously inert, and is it now live?"* — and the answer, missed, was sitting in a file
+this project had itself written onto the operator's disk. Fixing the mechanism is not the
+same as fixing the artefacts the broken mechanism produced.
+
+A second, independent cause was underneath it: `demo.yaml` pinned PostgreSQL, so even a
+clean `.env` made demo mode require Docker. Demo trading against an MT5 demo account has
+no such dependency; `demo.yaml` now uses a SQLite file and setup points it at PostgreSQL
+only when one is running. `live.yaml` still pins PostgreSQL, deliberately.
+
+Both are now guarded rather than merely fixed. `bootstrap --check-database` runs *before*
+alembic and:
+
+- confirms the configured database answers a `SELECT 1`;
+- if it does not, and the URL is one matching the template **we** generate, comments the
+  line out (leaving the original visible) and continues on the local default;
+- if the URL is anything else — a different host, port or database — reports the failure
+  and stops, because a URL someone typed represents a decision that outranks our guess.
+
+**Class of bug:** a fix that changes which inputs are consulted, applied to a system whose
+existing state was written under the old rules. The migration was the work, and the code
+change only looked like the work. Fixing a config mechanism means asking what the broken
+version already wrote, and where.

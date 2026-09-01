@@ -98,6 +98,9 @@ if exist ".venv\Scripts\python.exe" (
     echo   [OK] Packages updated
   )
 
+  echo   [..] Checking the database
+  call .venv\Scripts\python.exe -m xauusd.config.bootstrap --check-database
+
   echo   [..] Applying any database changes
   call .venv\Scripts\python.exe -m alembic upgrade head
   if errorlevel 1 ( echo   [!] Database update reported a problem. )
