@@ -425,3 +425,39 @@ documentation asks for, read by nothing. Both were found by tracing what a docum
 instruction actually reaches rather than by testing whether the code does what it says.
 Worth doing for every value in `.env.example`: who reads this, and what happens if
 nobody does?
+
+---
+
+## 22. Setup could not finish without Docker, while saying it could
+
+`Setup.bat` told the operator, when Docker was absent:
+
+> The system will fall back to a local SQLite database, which is fine for paper trading.
+
+No such fallback existed. `.env.example` set
+
+    XAUUSD_DATABASE__URL=postgresql+psycopg://xauusd:CHANGEME@localhost:5432/xauusd
+
+and — since environment values now correctly override YAML (finding 19) — that URL beat
+the SQLite default in `dev.yaml`. So on a machine without Docker the very next setup
+step, `alembic upgrade head`, tried to reach a PostgreSQL that was never started, failed,
+and setup exited. The message describing the fallback was the only place the fallback
+existed.
+
+Two mistakes compounded here, and the second is the interesting one:
+
+1. A message describing behaviour nobody implemented.
+2. **Fixing finding 19 created this.** While YAML outranked the environment, the
+   placeholder URL in `.env` was inert and `dev.yaml`'s SQLite won; the setup message
+   was accidentally true. Correcting the precedence made the placeholder load-bearing.
+
+`.env.example` no longer pins a database URL at all. Unset, the config layer decides:
+`dev` uses a local SQLite file that needs nothing installed, `demo` and `live` use
+PostgreSQL. Setup writes a URL only when it has actually started PostgreSQL, which is
+why the Docker check now runs *before* `.env` is written rather than after — what is
+running determines what belongs in the file.
+
+**Class of bug:** a correct fix reaching into a place nobody re-examined. The precedence
+change was right and tested; what went untested was every value that had been quietly
+depending on being ignored. Worth asking after any change to resolution order: what was
+previously inert, and is it now live?

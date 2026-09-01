@@ -46,29 +46,37 @@ call .venv\Scripts\python.exe -m pip install -e ".[dev,ml,api,db,mt5]" --quiet
 if errorlevel 1 ( echo   [X] Package installation failed. & pause & exit /b 1 )
 echo   [OK] Packages installed
 
+REM ------------------------------------------------------------- Datastores ---
+REM Decided BEFORE .env is written, because whether PostgreSQL is actually
+REM running determines which database URL belongs in it. Writing a Postgres URL
+REM on a machine with no Postgres is worse than writing none: the config files
+REM already fall back to a local SQLite file, and an unreachable URL overrides
+REM that and fails at the first connection.
+set USE_PG=
+docker --version >nul 2>&1
+if errorlevel 1 (
+  echo   [!] Docker Desktop was not found - using a local database file.
+  echo       That is fine for everything up to demo trading. Install Docker
+  echo       Desktop and run this setup again when you need PostgreSQL.
+) else (
+  echo   [..] Starting PostgreSQL and Redis
+  call .venv\Scripts\python.exe -m xauusd.config.bootstrap >nul 2>&1
+  docker compose up -d
+  if errorlevel 1 (
+    echo   [!] Docker could not start the datastores. Is Docker Desktop running?
+    echo       Falling back to a local database file.
+  ) else (
+    echo   [OK] PostgreSQL and Redis running
+    set USE_PG=--postgres
+  )
+)
+
 REM -------------------------------------------------------------- .env file ---
 REM Creates .env if missing and generates any secret that has no value yet.
 REM Existing values are never overwritten.
 echo   [..] Checking .env
-call .venv\Scripts\python.exe -m xauusd.config.bootstrap
+call .venv\Scripts\python.exe -m xauusd.config.bootstrap !USE_PG!
 if errorlevel 1 ( echo   [X] Could not prepare .env & pause & exit /b 1 )
-
-REM ------------------------------------------------------------- Datastores ---
-docker --version >nul 2>&1
-if errorlevel 1 (
-  echo   [!] Docker Desktop was not found.
-  echo       The system will fall back to a local SQLite database, which is fine
-  echo       for paper trading. For demo and live, install Docker Desktop and
-  echo       run this setup again.
-) else (
-  echo   [..] Starting PostgreSQL and Redis
-  docker compose up -d
-  if errorlevel 1 (
-    echo   [!] Docker could not start the datastores. Is Docker Desktop running?
-  ) else (
-    echo   [OK] Datastores running
-  )
-)
 
 REM ----------------------------------------------------------------- Schema ---
 echo   [..] Building the database schema

@@ -37,7 +37,10 @@ def parse_env(text: str) -> dict[str, str]:
     return out
 
 
-def ensure_env_file(root: Path | str = ".") -> dict[str, str]:
+POSTGRES_URL_TEMPLATE = "postgresql+psycopg://xauusd:{password}@localhost:5432/xauusd"
+
+
+def ensure_env_file(root: Path | str = ".", postgres: bool = False) -> dict[str, str]:
     """Create `.env` if absent and fill in any missing generated secret.
 
     Returns a report of what happened, so the caller can tell the operator rather than
@@ -84,13 +87,14 @@ def ensure_env_file(root: Path | str = ".") -> dict[str, str]:
             text += "\n"
         text += "\n".join(additions) + "\n"
 
-    # The generated Postgres password has to appear in TWO places: the variable compose
-    # reads, and the connection string the engine reads. Leaving the operator to copy it
-    # across by hand is a step that gets missed, and the failure is a connection refused
-    # at startup with nothing to say why.
-    text, wired = _wire_database_password(text)
-    if wired:
-        report["XAUUSD_DATABASE__URL"] = "database password filled in"
+    # Only point at PostgreSQL when setup has actually started it. Writing a Postgres
+    # URL on a machine with no Postgres is worse than writing nothing: the config files
+    # already fall back to a local SQLite file that needs nothing installed, and an
+    # unreachable URL here overrides that and fails at the first connection.
+    if postgres:
+        text, wired = _wire_database_password(text)
+        if wired:
+            report["XAUUSD_DATABASE__URL"] = "pointed at PostgreSQL"
 
     if text and not text.endswith("\n"):
         text += "\n"
@@ -108,24 +112,42 @@ def _wire_database_password(text: str) -> tuple[str, bool]:
     host, a managed database, their own password — is left exactly as it is.
     """
     parsed = parse_env(text)
-    url = parsed.get("XAUUSD_DATABASE__URL", "")
     password = parsed.get("POSTGRES_PASSWORD", "")
-    if not url or not password or not url.startswith("postgres"):
-        return text, False
-    if not any(ph in url for ph in DB_PLACEHOLDERS):
+    if not password:
         return text, False
 
-    new_url = url.replace("CHANGEME", password).replace("xauusd:xauusd@", f"xauusd:{password}@")
+    url = parsed.get("XAUUSD_DATABASE__URL", "")
+    if url and not url.startswith("postgres"):
+        return text, False  # they chose something else; leave it
+    if url and not any(ph in url for ph in DB_PLACEHOLDERS):
+        return text, False  # already a real URL they may have edited
+
+    new_url = POSTGRES_URL_TEMPLATE.format(password=password)
     lines = text.splitlines()
-    out = [
-        f"XAUUSD_DATABASE__URL={new_url}" if ln.strip().startswith("XAUUSD_DATABASE__URL=") else ln
-        for ln in lines
-    ]
+    replaced = False
+    out = []
+    for ln in lines:
+        if ln.strip().startswith("XAUUSD_DATABASE__URL="):
+            out.append(f"XAUUSD_DATABASE__URL={new_url}")
+            replaced = True
+        else:
+            out.append(ln)
+    if not replaced:
+        out.append(f"XAUUSD_DATABASE__URL={new_url}")
     return "\n".join(out) + ("\n" if text.endswith("\n") else ""), True
 
 
 def main() -> int:
-    report = ensure_env_file(Path.cwd())
+    import argparse
+
+    ap = argparse.ArgumentParser(description="prepare .env for first run")
+    ap.add_argument(
+        "--postgres",
+        action="store_true",
+        help="PostgreSQL is running; point the database URL at it",
+    )
+    args = ap.parse_args()
+    report = ensure_env_file(Path.cwd(), postgres=args.postgres)
     for key, what in report.items():
         # Never print the values themselves — this runs in a console window that may be
         # screen-shared, and the whole point of the file is that they stay in it.

@@ -91,12 +91,28 @@ class TestGeneratesOnlyWhatIsMissing:
         assert (tmp_path / ".env").read_text().endswith("\n")
 
 
-class TestTheDatabasePasswordIsWiredThrough:
-    """The generated password must reach BOTH the compose variable and the connection
-    string. Leaving the operator to copy it across is a step that gets missed, and the
-    failure is a refused connection at startup with nothing explaining why."""
+class TestTheDatabaseUrlFollowsWhatIsActuallyRunning:
+    """Whether PostgreSQL exists decides what belongs in the file.
 
-    def test_the_placeholder_password_is_replaced(self, tmp_path: Path) -> None:
+    Writing a Postgres URL on a machine with no Postgres is worse than writing none:
+    the config files already fall back to a local SQLite file that needs nothing
+    installed, and an unreachable URL overrides that and fails at first connection —
+    which is what made setup unfinishable for anyone who skipped Docker.
+    """
+
+    def test_no_url_is_written_when_postgres_is_absent(self, tmp_path: Path) -> None:
+        write(tmp_path, ".env.example", "POSTGRES_PASSWORD=\n")
+        ensure_env_file(tmp_path)
+        assert "XAUUSD_DATABASE__URL" not in parse_env((tmp_path / ".env").read_text())
+
+    def test_the_url_is_written_when_postgres_is_running(self, tmp_path: Path) -> None:
+        write(tmp_path, ".env.example", "POSTGRES_PASSWORD=\n")
+        ensure_env_file(tmp_path, postgres=True)
+        parsed = parse_env((tmp_path / ".env").read_text())
+        assert parsed["XAUUSD_DATABASE__URL"].startswith("postgresql+psycopg://")
+        assert parsed["POSTGRES_PASSWORD"] in parsed["XAUUSD_DATABASE__URL"]
+
+    def test_a_placeholder_password_is_replaced(self, tmp_path: Path) -> None:
         write(tmp_path, ".env.example", "")
         write(
             tmp_path,
@@ -104,21 +120,9 @@ class TestTheDatabasePasswordIsWiredThrough:
             "POSTGRES_PASSWORD=\n"
             "XAUUSD_DATABASE__URL=postgresql+psycopg://xauusd:CHANGEME@localhost:5432/xauusd\n",
         )
-        ensure_env_file(tmp_path)
+        ensure_env_file(tmp_path, postgres=True)
         parsed = parse_env((tmp_path / ".env").read_text())
         assert "CHANGEME" not in parsed["XAUUSD_DATABASE__URL"]
-        assert parsed["POSTGRES_PASSWORD"] in parsed["XAUUSD_DATABASE__URL"]
-
-    def test_the_compose_style_placeholder_is_replaced(self, tmp_path: Path) -> None:
-        write(tmp_path, ".env.example", "")
-        write(
-            tmp_path,
-            ".env",
-            "POSTGRES_PASSWORD=\n"
-            "XAUUSD_DATABASE__URL=postgresql+psycopg://xauusd:xauusd@localhost:5432/xauusd\n",
-        )
-        ensure_env_file(tmp_path)
-        parsed = parse_env((tmp_path / ".env").read_text())
         assert parsed["POSTGRES_PASSWORD"] in parsed["XAUUSD_DATABASE__URL"]
 
     def test_an_edited_url_is_left_alone(self, tmp_path: Path) -> None:
@@ -126,13 +130,13 @@ class TestTheDatabasePasswordIsWiredThrough:
         url = "postgresql+psycopg://ops:their-own-secret@db.internal:5432/xauusd"
         write(tmp_path, ".env.example", "")
         write(tmp_path, ".env", f"POSTGRES_PASSWORD=generated\nXAUUSD_DATABASE__URL={url}\n")
-        ensure_env_file(tmp_path)
+        ensure_env_file(tmp_path, postgres=True)
         assert parse_env((tmp_path / ".env").read_text())["XAUUSD_DATABASE__URL"] == url
 
     def test_a_sqlite_url_is_left_alone(self, tmp_path: Path) -> None:
         write(tmp_path, ".env.example", "")
         write(tmp_path, ".env", "POSTGRES_PASSWORD=\nXAUUSD_DATABASE__URL=sqlite:///data/x.db\n")
-        ensure_env_file(tmp_path)
+        ensure_env_file(tmp_path, postgres=True)
         assert parse_env((tmp_path / ".env").read_text())["XAUUSD_DATABASE__URL"] == (
             "sqlite:///data/x.db"
         )
