@@ -468,3 +468,47 @@ running determines what belongs in the file.
 change was right and tested; what went untested was every value that had been quietly
 depending on being ignored. Worth asking after any change to resolution order: what was
 previously inert, and is it now live?
+
+---
+
+## 23. The file every document points at was never opened
+
+An operator filled in `.env` exactly as instructed — broker login, password, server,
+terminal path, and `XAUUSD_ENV=demo` — restarted, ran the pre-flight check, and got:
+
+    config : env=dev mode=PAPER
+    broker : OK (kind=sim) login=0 equity=10000.00 USD
+
+    READY
+
+`READY`. Green. Entirely wrong, and nothing on screen connected the correct file to the
+ignored settings.
+
+Two independent bugs, either of which alone was enough:
+
+**1. `Settings.model_config` had no `env_file`.** Without it pydantic-settings does not
+open `.env` at all. There is no warning for this — the file is simply never read, values
+fall through to the config files, and everything looks normal. Every piece of
+documentation in this repository (`.env.example`, the deployment runbook, the setup
+guide) tells the operator to put their credentials there.
+
+**2. `load_settings` chose the YAML layer from `os.environ` alone.** Even once `.env`
+was being read, `XAUUSD_ENV=demo` in it set `settings.env = "demo"` while the loader
+still layered `dev.yaml` — because which file to layer is decided *before* Settings
+exists. So `demo.yaml`, the file that switches the broker from `sim` to `mt5_grpc`, was
+never loaded, and the engine stayed on the simulator while reporting `env=demo`.
+
+Why this survived every test: the precedence work in finding 19 was verified by setting
+real environment variables (`XAUUSD_DATABASE__URL=... python -c ...`), which exercises
+`env_settings` and never touches `dotenv_settings`. The tests were right about what they
+tested. Nothing tested the path the documentation actually describes.
+
+Beyond fixing both, `doctor` now states whether `.env` was found, its resolved absolute
+path, and how many settings were read from it. The original failure was not that the
+file was ignored; it was that a confident report gave no way to discover it.
+
+**Class of bug:** a configuration source that fails open into plausibility. A missing
+file, a refused connection, a malformed value — all announce themselves. A source that
+is silently never consulted produces a system that runs perfectly on the wrong settings.
+Worth asking of any config mechanism: if this input were ignored entirely, what would I
+see? If the answer is "a normal-looking startup", something has to say otherwise.

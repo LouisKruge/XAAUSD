@@ -485,6 +485,13 @@ class Settings(BaseSettings):
         env_nested_delimiter="__",
         extra="ignore",
         frozen=True,
+        # Without env_file, pydantic-settings never opens `.env` at all — and `.env` is
+        # where every piece of documentation tells the operator to put their broker
+        # credentials. Its absence was silent: settings simply fell back to the config
+        # files, so the engine reported the simulated broker and login=0 while a
+        # correctly-filled .env sat next to it.
+        env_file=".env",
+        env_file_encoding="utf-8",
     )
 
     env: str = "dev"
@@ -564,6 +571,29 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
     return out
 
 
+def _resolve_env_name(env_file: str | Path = ".env") -> str:
+    """Which config environment to load: dev, demo or live.
+
+    This has to consider `.env` as well as the process environment. Everything else
+    reaches Settings through pydantic, which reads both — but WHICH yaml file to layer
+    is decided here, before Settings exists. Reading only os.environ meant an operator
+    who set XAUUSD_ENV=demo in .env got demo in `settings.env` while the loader still
+    layered dev.yaml, so the broker stayed on the simulator and nothing said why.
+    """
+    from_process = os.environ.get("XAUUSD_ENV")
+    if from_process:
+        return from_process
+    path = Path(env_file)
+    if path.exists():
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if line.startswith("XAUUSD_ENV="):
+                value = line.partition("=")[2].strip().strip("\"'")
+                if value:
+                    return value
+    return "dev"
+
+
 def load_settings(
     config_dir: str | Path = "config",
     env: str | None = None,
@@ -571,7 +601,7 @@ def load_settings(
 ) -> Settings:
     """Load layered configuration. Raises immediately on an invalid value."""
     cfg_dir = Path(config_dir)
-    env = env or os.environ.get("XAUUSD_ENV", "dev")
+    env = env or _resolve_env_name()
     merged: dict[str, Any] = {}
     for name in ("base.yaml", f"{env}.yaml", "local.yaml"):
         path = cfg_dir / name

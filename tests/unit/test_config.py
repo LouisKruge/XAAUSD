@@ -181,3 +181,85 @@ class TestSourcePrecedence:
         (cfg / "base.yaml").write_text("symbol: XAUUSD.a\n")
         load_settings(config_dir=cfg)
         assert Settings().symbol == "XAUUSD", "the YAML layer outlived its load_settings call"
+
+
+class TestTheEnvFileIsActuallyRead:
+    """`.env` is where every document tells the operator to put their broker credentials.
+
+    Settings had no `env_file` in its model_config, so pydantic-settings never opened
+    the file. There was no error: values fell back to the config files, and the engine
+    reported the simulated broker with login=0 while a correctly-filled .env sat beside
+    it. Nothing in the pre-flight report hinted that the file had not been read.
+    """
+
+    def test_values_in_the_env_file_reach_settings(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text(
+            "XAUUSD_BROKER__LOGIN=111958443\nXAUUSD_BROKER__SERVER=MetaQuotes-Demo\n"
+        )
+        settings = Settings()
+        assert settings.broker.login == 111958443
+        assert settings.broker.server == "MetaQuotes-Demo"
+
+    def test_the_process_environment_still_wins_over_the_file(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("XAUUSD_BROKER__LOGIN=111111\n")
+        monkeypatch.setenv("XAUUSD_BROKER__LOGIN", "222222")
+        assert Settings().broker.login == 222222
+
+    def test_the_env_file_beats_the_config_files(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        (cfg / "base.yaml").write_text("symbol: FROM-YAML\n")
+        (tmp_path / ".env").write_text("XAUUSD_SYMBOL=FROM-ENV-FILE\n")
+        assert load_settings(config_dir=cfg).symbol == "FROM-ENV-FILE"
+
+
+class TestTheEnvFileChoosesTheConfigEnvironment:
+    """Which yaml file is layered is decided before Settings exists, so it has to read
+    `.env` itself. Reading only os.environ meant XAUUSD_ENV=demo in .env produced
+    settings.env == "demo" while the loader still layered dev.yaml — so the broker
+    stayed on the simulator and nothing explained why."""
+
+    def test_env_file_selects_the_yaml_layer(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("XAUUSD_ENV", raising=False)
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        (cfg / "base.yaml").write_text("symbol: BASE\n")
+        (cfg / "demo.yaml").write_text("symbol: FROM-DEMO-YAML\n")
+        (tmp_path / ".env").write_text("XAUUSD_ENV=demo\n")
+
+        settings = load_settings(config_dir=cfg)
+        assert settings.env == "demo"
+        assert settings.symbol == "FROM-DEMO-YAML", "demo.yaml was not layered"
+
+    def test_the_process_environment_still_wins(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("XAUUSD_ENV", "live")
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        (cfg / "base.yaml").write_text("symbol: BASE\n")
+        (cfg / "demo.yaml").write_text("symbol: DEMO\n")
+        (cfg / "live.yaml").write_text("symbol: LIVE\n")
+        (tmp_path / ".env").write_text("XAUUSD_ENV=demo\n")
+        assert load_settings(config_dir=cfg).symbol == "LIVE"
+
+    def test_an_explicit_argument_beats_both(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("XAUUSD_ENV", "live")
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        (cfg / "base.yaml").write_text("symbol: BASE\n")
+        (cfg / "demo.yaml").write_text("symbol: DEMO\n")
+        (tmp_path / ".env").write_text("XAUUSD_ENV=live\n")
+        assert load_settings(config_dir=cfg, env="demo").symbol == "DEMO"
+
+    def test_no_env_file_still_defaults_to_dev(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("XAUUSD_ENV", raising=False)
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        (cfg / "base.yaml").write_text("symbol: BASE\n")
+        assert load_settings(config_dir=cfg).env == "dev"

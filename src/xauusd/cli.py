@@ -96,6 +96,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     )
     print(f"min RR           : {settings.thresholds.min_rr}")
 
+    # Say plainly whether .env was found and used. Its absence was the failure that
+    # produced a confident, entirely wrong report: correct credentials in the file,
+    # a simulated broker in the output, and nothing connecting the two.
+    env_path = Path(".env").resolve()
+    if env_path.exists():
+        from xauusd.config.bootstrap import parse_env
+
+        keys = parse_env(env_path.read_text(encoding="utf-8", errors="replace"))
+        filled = sum(1 for k, v in keys.items() if k.startswith("XAUUSD_") and v)
+        print(f".env             : read from {env_path} ({filled} setting(s))")
+    else:
+        print(f".env             : NOT FOUND at {env_path} — settings come from config/ only")
+
     dash = settings.dashboard
     if dash.is_loopback:
         exposure = f"loopback ({dash.host}:{dash.port}) — tunnel to reach it remotely"
