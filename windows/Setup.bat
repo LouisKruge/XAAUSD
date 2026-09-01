@@ -98,9 +98,10 @@ echo   ==========================================================
 echo    Setup complete.
 echo.
 echo    On your Desktop you now have:
-echo      "Start XAUUSD Bot"  - starts everything, opens the dashboard
-echo      "Stop XAUUSD Bot"   - stops everything
-echo      "Arm Live Trading"  - only when you are ready for real money
+echo      "Start XAUUSD Bot"   - starts everything, opens the dashboard
+echo      "Stop XAUUSD Bot"    - stops everything
+echo      "Update XAUUSD Bot"  - get the latest version, keeping your settings
+echo      "Arm Live Trading"   - only when you are ready for real money
 echo.
 echo    Start the bot, then use the dashboard for everything else:
 echo    pre-flight checks, backtests, and the validation gate are all

@@ -34,6 +34,12 @@ New-Shortcut -Name 'Stop XAUUSD Bot' `
     -Description 'Stop the trading engine, the MT5 bridge and the dashboard' `
     -IconIndex 27
 
+New-Shortcut -Name 'Update XAUUSD Bot' `
+    -Target "$env:SystemRoot\System32\cmd.exe" `
+    -Arguments "/c `"$Root\windows\Update.bat`"" `
+    -Description 'Download the latest version. Your settings and data are preserved' `
+    -IconIndex 46
+
 # Live arming stays a deliberate act at the machine, with a visible console and
 # typed confirmations. It is key 2 of the two-key design: routing it through the
 # dashboard would collapse both keys into one channel.
