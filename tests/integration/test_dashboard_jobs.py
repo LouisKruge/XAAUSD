@@ -30,7 +30,12 @@ class TestOnlyAllowlistedWorkRuns:
             runner.start("rm -rf /")
 
     def test_the_catalogue_is_a_closed_set(self, runner: JobRunner) -> None:
-        assert {j["key"] for j in runner.catalogue()} == {"doctor", "validate", "backtest"}
+        assert {j["key"] for j in runner.catalogue()} == {
+            "sample_data",
+            "doctor",
+            "validate",
+            "backtest",
+        }
 
     def test_no_job_reaches_a_shell(self) -> None:
         """Every argv is a list whose first entry is the interpreter, so nothing is
@@ -153,4 +158,4 @@ class TestTheJobApiIsGuardedToo:
     def test_the_catalogue_is_served_with_the_token(self, client) -> None:  # type: ignore[no-untyped-def]
         r = client.get("/api/jobs/catalogue", headers=AUTH)
         assert r.status_code == 200
-        assert {j["key"] for j in r.json()} == {"doctor", "validate", "backtest"}
+        assert {j["key"] for j in r.json()} == {"sample_data", "doctor", "validate", "backtest"}

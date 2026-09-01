@@ -79,6 +79,22 @@ class ValidateJob(JobSpec):
 
 
 @dataclass
+class SampleDataJob(JobSpec):
+    """Populate the database so the dashboard can be explored before a broker exists.
+
+    Without this the first thing a new operator sees is five empty panels, which is
+    indistinguishable from a broken install.
+    """
+
+    def argv(self, values: dict[str, int]) -> list[str]:
+        return [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "seed_demo_data.py"),
+            str(values["days"]),
+        ]
+
+
+@dataclass
 class BacktestJob(JobSpec):
     def argv(self, values: dict[str, int]) -> list[str]:
         return [
@@ -94,6 +110,16 @@ class BacktestJob(JobSpec):
 
 
 JOBS: dict[str, JobSpec] = {
+    "sample_data": SampleDataJob(
+        key="sample_data",
+        title="Load sample data",
+        description=(
+            "Fills the dashboard with realistic decisions, trades and equity history so "
+            "you can see how every screen reads before connecting a broker. Sample data "
+            "only — it is not a backtest and proves nothing about the strategy."
+        ),
+        params={"days": (45, 5, 365)},
+    ),
     "doctor": DoctorJob(
         key="doctor",
         title="Pre-flight check",
