@@ -150,6 +150,26 @@ class TestTheDatabaseIsCheckedBeforeItIsUsed:
     that was fixed, pointing at a database the machine never had.
     """
 
+    def test_a_fresh_install_with_no_data_directory_works(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        """`data/` holds only generated files, so it is not in the repository and a
+        fresh install does not have one. SQLite cannot create a file in a directory
+        that does not exist, and the resulting OperationalError reads like the
+        database is unreachable rather than like a missing folder.
+
+        The check must build its engine the same way the application does — via
+        make_engine, which creates the directory — rather than reimplementing it.
+        """
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config").mkdir()
+        (tmp_path / ".env").write_text("XAUUSD_DATABASE__URL=sqlite:///data/fresh.db\n")
+        assert not (tmp_path / "data").exists()
+
+        ok, detail = check_database(tmp_path)
+        assert ok, detail
+        assert (tmp_path / "data" / "fresh.db").exists()
+
     def test_a_reachable_database_passes(self, tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         monkeypatch.chdir(tmp_path)
         (tmp_path / "config").mkdir()

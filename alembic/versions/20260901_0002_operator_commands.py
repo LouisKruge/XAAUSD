@@ -45,9 +45,7 @@ def upgrade() -> None:
     )
     # The engine's poll is "the oldest queued command"; without this it is a table scan
     # on a table that only ever grows.
-    op.create_index(
-        "ix_operator_commands_status", "operator_commands", ["status", "queued_at"]
-    )
+    op.create_index("ix_operator_commands_status", "operator_commands", ["status", "queued_at"])
 
 
 def downgrade() -> None:

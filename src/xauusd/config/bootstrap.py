@@ -160,18 +160,22 @@ def check_database(root: Path | str = ".") -> tuple[bool, str]:
     config files already name a working local database. The line is preserved as a
     comment so the change is visible and reversible.
     """
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import text
 
     from xauusd.config.settings import load_settings
+    from xauusd.database.session import make_engine
 
     root = Path(root)
     settings = load_settings()
     url = settings.database.url
 
     try:
-        engine = create_engine(
-            url, connect_args={"connect_timeout": 5} if "postgres" in url else {}
-        )
+        # make_engine, not create_engine: it creates the parent directory for a
+        # file-backed SQLite database. `data/` is not in the repository (it holds
+        # only generated files), so a fresh install has no such directory and a raw
+        # create_engine fails with an OperationalError that reads like the database
+        # is unreachable rather than like a missing folder.
+        engine = make_engine(url)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return True, f"reachable ({url.split('@')[-1] if '@' in url else url})"

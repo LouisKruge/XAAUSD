@@ -4,9 +4,9 @@ Creates every table from xauusd.database.models, then applies the PostgreSQL-onl
 TimescaleDB hypertables and indexes. The Timescale section is skipped on SQLite so
 the same migration works for local development and tests.
 """
+
 from __future__ import annotations
 
-import sqlalchemy as sa
 from alembic import op
 
 revision = "0001"
@@ -51,10 +51,8 @@ def upgrade() -> None:
     op.execute("SELECT add_retention_policy('ticks', INTERVAL '90 days')")
 
     # JSONB indexes for the explainability queries the dashboard runs.
-    op.execute("CREATE INDEX IF NOT EXISTS ix_decisions_features "
-               "ON decisions USING gin (features)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_decisions_gates "
-               "ON decisions USING gin (gate_trace)")
+    op.execute("CREATE INDEX IF NOT EXISTS ix_decisions_features ON decisions USING gin (features)")
+    op.execute("CREATE INDEX IF NOT EXISTS ix_decisions_gates ON decisions USING gin (gate_trace)")
 
     # A read-only role for the dashboard. The dashboard process must not be able to
     # write to the trading tables; its only write paths go through the engine.
@@ -71,8 +69,7 @@ def upgrade() -> None:
     op.execute("GRANT USAGE ON SCHEMA public TO xauusd_readonly")
     op.execute("GRANT SELECT ON ALL TABLES IN SCHEMA public TO xauusd_readonly")
     op.execute(
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-        "GRANT SELECT ON TABLES TO xauusd_readonly"
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO xauusd_readonly"
     )
 
 

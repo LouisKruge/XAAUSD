@@ -623,3 +623,40 @@ were all pre-existing state that only became reachable.
 executable configuration, not documentation, and it now has a test that loads it exactly
 as an operator would. Worth asking of any template a project ships: does anything actually
 run it?
+
+---
+
+## 27. The new database check could not open a database
+
+Setup got past the blank-line fix and stopped on:
+
+    database: sqlite:///data/xauusd_dev.db is not reachable (OperationalError)
+
+SQLite, on a local file, on a machine with nothing else to blame. The cause was that
+`data/` did not exist: it holds only generated files, so it is not in the repository, and
+a fresh install therefore has no such directory. SQLite will not create a database file
+in a directory that is not there.
+
+The project already solved this. `database.session.make_engine` creates the parent
+directory for a file-backed SQLite URL, and has since the beginning. But `check_database`
+— written the previous day, for finding 24 — called `sqlalchemy.create_engine` directly:
+
+```python
+engine = create_engine(url, connect_args={"connect_timeout": 5} if "postgres" in url else {})
+```
+
+Reimplementing engine construction to add one connect argument silently dropped every
+other thing the real constructor does. The diagnostic added to prevent an unhelpful
+database error became the source of one.
+
+`alembic/env.py` uses `engine_from_config` and had the same blind spot. It worked only
+because setup happens to run the check first, which created the directory as a side
+effect — an ordering dependency nobody wrote down and nothing tested. It now ensures the
+directory itself.
+
+**Class of bug:** a helper reimplemented instead of reused, for a reason that turned out
+to be incidental. The connect timeout could have been a parameter to `make_engine`; going
+around it instead discarded the accumulated knowledge in the function — which is exactly
+what a shared constructor is for. Worth asking when writing `create_engine`, `open`, or
+any other primitive: does this codebase already have a wrapper for this, and what does it
+know that I am about to forget?

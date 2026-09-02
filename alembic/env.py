@@ -1,4 +1,5 @@
 """Alembic environment. Reads the database URL from the application settings."""
+
 from __future__ import annotations
 
 import os
@@ -11,8 +12,8 @@ from sqlalchemy import engine_from_config, pool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from xauusd.config.settings import load_settings  # noqa: E402
-from xauusd.database.models import Base  # noqa: E402
+from xauusd.config.settings import load_settings
+from xauusd.database.models import Base
 
 config = context.config
 if config.config_file_name is not None:
@@ -20,12 +21,27 @@ if config.config_file_name is not None:
 
 url = os.environ.get("XAUUSD_DATABASE__URL") or load_settings().database.url
 config.set_main_option("sqlalchemy.url", url)
+
+# A file-backed SQLite database needs its directory to exist. `data/` holds only
+# generated files so it is not in the repository, which means a fresh install has no
+# such directory and engine_from_config below would fail with an OperationalError that
+# reads like the database is unreachable. Setup happens to create it earlier, but
+# depending on that ordering is how this breaks again later.
+if url.startswith("sqlite") and ":memory:" not in url:
+    _path = url.split("///", 1)[-1]
+    if _path:
+        Path(_path).parent.mkdir(parents=True, exist_ok=True)
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=url, target_metadata=target_metadata, literal_binds=True,
-                      dialect_opts={"paramstyle": "named"}, compare_type=True)
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+        compare_type=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
@@ -33,11 +49,11 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.", poolclass=pool.NullPool,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata,
-                          compare_type=True)
+        context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
         with context.begin_transaction():
             context.run_migrations()
 
