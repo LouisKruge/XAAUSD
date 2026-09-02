@@ -372,7 +372,10 @@ def g_no_duplicate(c: GateContext) -> GateResult:
 # Ordering: cheapest and most-likely-to-fail first
 # --------------------------------------------------------------------------------------
 
-MANDATORY_GATES: list[GateFn] = [
+# Gates that answer "is this a moment worth trading in at all?". Every one is
+# meaningful without a candidate, which is what makes them the right set to evaluate on
+# a cycle where no strategy found a setup.
+ENVIRONMENT_GATES: list[GateFn] = [
     g_kill_switch,
     g_broker_connection,
     g_symbol_resolved,
@@ -387,9 +390,26 @@ MANDATORY_GATES: list[GateFn] = [
     g_news_blackout,
     g_news_risk,
     g_market_regime,
-    g_has_candidate,
     g_strategy_validated,
     g_no_duplicate,
+]
+
+# Gates that judge a specific plan. Run without one they do not fail meaningfully — they
+# report "no plan", which is not a reason a trade was rejected. It is the absence of
+# anything to reject, and recording it as a rejection reason fills the ledger with
+# entries that look like blocked setups and are not.
+PLAN_GATES: list[GateFn] = [
+    g_has_candidate,
+    g_htf_conflict,
+    g_min_rr,
+    g_stop_validity,
+    g_premium_discount,
+]
+
+MANDATORY_GATES: list[GateFn] = [
+    *ENVIRONMENT_GATES[:14],  # environment checks, in evaluation order
+    g_has_candidate,
+    *ENVIRONMENT_GATES[14:],  # strategy_validated, no_duplicate
     g_htf_conflict,
     g_min_rr,
     g_stop_validity,

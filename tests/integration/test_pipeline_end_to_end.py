@@ -275,3 +275,43 @@ class TestHardLimitsHoldUnderPermissiveThresholds:
                 spread_median=22,
             )
             assert not r.traded
+
+
+class TestANoCandidateDecisionRecordsOnlyRealReasons:
+    """The rejection ledger exists to answer one question during paper trading: did the
+    market offer nothing, or is a filter quietly rejecting everything?
+
+    Running the plan gates with no plan produced entries like `min_rr: None` and
+    `htf_conflict: no plan` — which read as blocked setups and were nothing of the sort.
+    Four such entries on every idle cycle bury the real signal in a ledger whose whole
+    value is the shape of its distribution.
+    """
+
+    def test_no_plan_shaped_noise_reaches_the_ledger(self) -> None:
+        from xauusd.strategy.gates import ENVIRONMENT_GATES, PLAN_GATES
+
+        plan_gate_names = {g.__name__.removeprefix("g_") for g in PLAN_GATES}
+        env_gate_names = {g.__name__.removeprefix("g_") for g in ENVIRONMENT_GATES}
+
+        # The four that reported "no plan" in the live journal.
+        assert {"htf_conflict", "min_rr", "stop_validity", "premium_discount"} <= plan_gate_names
+        assert not (plan_gate_names & env_gate_names), "a gate belongs to exactly one set"
+
+    def test_every_environment_gate_is_meaningful_without_a_plan(self) -> None:
+        """The set is only correct if each member can actually be judged with plan=None."""
+        import inspect
+
+        from xauusd.strategy.gates import ENVIRONMENT_GATES
+
+        for gate in ENVIRONMENT_GATES:
+            source = inspect.getsource(gate)
+            assert "c.plan is None" not in source, (
+                f"{gate.__name__} short-circuits on a missing plan, so it is a plan gate"
+            )
+
+    def test_the_two_sets_partition_the_mandatory_gates(self) -> None:
+        """Nothing may be dropped from evaluation by the split."""
+        from xauusd.strategy.gates import ENVIRONMENT_GATES, MANDATORY_GATES, PLAN_GATES
+
+        assert set(ENVIRONMENT_GATES) | set(PLAN_GATES) == set(MANDATORY_GATES)
+        assert len(MANDATORY_GATES) == len(ENVIRONMENT_GATES) + len(PLAN_GATES)

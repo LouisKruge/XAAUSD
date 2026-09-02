@@ -759,3 +759,50 @@ trade, and that is now reachable.
 side was exercised with its counterpart hand-supplied. The question worth asking of any
 optional parameter that carries a safety property: what test would fail if nobody ever
 passed it? If the answer is "none", nobody does.
+
+---
+
+## 31. Four fake rejection reasons on every idle cycle
+
+The first live decision journal, from a real MT5 connection on an idle market:
+
+    NO_TRADE · no candidate
+
+    REASONS AGAINST
+      htf_conflict: no plan
+      min_rr: None
+      stop_validity: no plan or spec
+      premium_discount: no plan
+
+None of those are reasons a trade was rejected. They are four gates that judge a
+*specific plan* being run with no plan, each reporting that it had nothing to judge.
+`min_rr: None` in particular reads as though the 1:2 floor blocked something.
+
+`_no_candidate_decision` ran the full `MANDATORY_GATES` list and reported every failure
+except `has_candidate` as an "environment block". Its docstring states the purpose
+exactly right — *"without this the rejection ledger cannot distinguish 'the market
+offered nothing' from 'a filter is broken and silently rejecting everything', which is
+the single most useful thing to know during paper trading"* — and then buried that
+distinction under four entries of noise on every single idle cycle. The system is
+designed to be idle most of the time, so the noise would have dominated the ledger
+completely.
+
+The gates now split explicitly. `ENVIRONMENT_GATES` (16) answer "is this a moment worth
+trading in at all?" and are meaningful with no candidate. `PLAN_GATES` (5) judge a
+specific plan. `MANDATORY_GATES` remains both, in the original evaluation order, so
+nothing changes for a cycle that *has* a candidate. The no-candidate path runs only the
+environment set.
+
+Over 40 idle cycles the ledger went from four noise entries each to zero, leaving a
+distribution that reads: 28 "environment is tradable but no strategy found a valid
+setup", 12 "session". That is exactly the shape the runbook tells an operator to look
+for, and it was previously unreadable.
+
+There is a test asserting no `ENVIRONMENT_GATES` member short-circuits on a missing plan
+— checked against the gate's own source — so the split cannot silently rot as gates are
+added.
+
+**Class of bug:** a correct intention, undermined by the implementation of the very
+feature meant to serve it. The docstring and the code disagreed, and only the docstring
+was right. Worth checking when a function explains what it is for: does it do that, or
+does it do something adjacent that happens to include it?

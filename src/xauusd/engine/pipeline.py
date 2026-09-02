@@ -42,7 +42,7 @@ from xauusd.risk.gate import RiskDecision, RiskGate
 from xauusd.strategy.base import StrategyRegistry, default_registry
 from xauusd.strategy.classifier import Classifier
 from xauusd.strategy.features import FeatureVector, extract
-from xauusd.strategy.gates import GateContext, run_gates
+from xauusd.strategy.gates import ENVIRONMENT_GATES, GateContext, run_gates
 from xauusd.strategy.scoring import ScoringEngine, reasons_for_and_against
 
 log = get_logger(__name__)
@@ -302,9 +302,15 @@ class DecisionPipeline:
         nothing" from "a filter is broken and silently rejecting everything", which is
         the single most useful thing to know during paper trading.
         """
+        # ENVIRONMENT_GATES only. The plan gates judge a specific candidate, and with no
+        # candidate they report "no plan" — which is not a reason a trade was rejected,
+        # it is the absence of anything to reject. Recording those filled the ledger with
+        # entries like "min_rr: None" that read as blocked setups and were nothing of the
+        # sort, burying the one distinction this decision exists to make: did the market
+        # offer nothing, or is a filter quietly rejecting everything?
         ctx = self._gate_context(snap, None, state, view, ValidationStatus.DEV)
-        gates = run_gates(ctx)
-        environment_blocks = [g for g in gates if not g.passed and g.name != "has_candidate"]
+        gates = run_gates(ctx, ENVIRONMENT_GATES)
+        environment_blocks = [g for g in gates if not g.passed]
         against = (
             [f"{g.name}: {g.observed}" for g in environment_blocks]
             if environment_blocks
