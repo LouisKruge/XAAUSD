@@ -14,6 +14,7 @@ for the probability model.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Protocol
@@ -22,7 +23,7 @@ from xauusd.config.settings import Settings
 from xauusd.core.analyzer import MarketAnalyzer
 from xauusd.core.sessions import SessionEngine
 from xauusd.data.marketview import MarketView
-from xauusd.domain.enums import Classification, ValidationStatus
+from xauusd.domain.enums import Classification, Direction, ValidationStatus
 from xauusd.domain.types import (
     AccountState,
     BrokerPosition,
@@ -72,6 +73,14 @@ class EngineState:
     spec_unchanged: bool = True
     strategy_status: dict[str, ValidationStatus] = field(default_factory=dict)
     fx_rate_to_account: float = 1.0
+
+    # The broker's own answer to "what does one lot lose between these two prices?".
+    # PositionSizer cross-checks its arithmetic against this and refuses to trade when
+    # they disagree by more than the configured tolerance — which is the only thing that
+    # catches a symbol specification whose tick value does not match its contract size
+    # and tick size. Left as None the cross-check silently never runs, which is how it
+    # sat for the whole of development.
+    calc_profit: Callable[[Direction, float, float], float | None] | None = None
 
 
 @dataclass(slots=True)
@@ -151,6 +160,23 @@ class DecisionPipeline:
 
     # -- stages ------------------------------------------------------------------------
 
+    @staticmethod
+    def _broker_loss_for_one_lot(state: EngineState, plan: TradePlan) -> float | None:
+        """What the broker says one lot loses moving from entry to stop.
+
+        Returns None when unavailable — no broker, or the call failed — because the
+        cross-check is corroboration, not a precondition. A broker that cannot answer
+        must not stop the engine evaluating; PositionSizer already refuses to trade when
+        the answer it gets DISAGREES, which is the case that matters.
+        """
+        if state.calc_profit is None:
+            return None
+        try:
+            value = state.calc_profit(plan.direction, plan.entry, plan.stop_loss)
+            return float(value) if value is not None else None
+        except Exception:
+            return None
+
     def _detect(self, view: MarketView, snap: MarketSnapshot) -> list[TradePlan]:
         plans: list[TradePlan] = []
         for strategy in self.registry.enabled(self.settings):
@@ -226,6 +252,7 @@ class DecisionPipeline:
                 trades_today=state.trades_today,
                 fx_rate_to_account=state.fx_rate_to_account,
                 confidence=probability,
+                broker_calc_profit=self._broker_loss_for_one_lot(state, plan),
             )
             all_gates.extend(risk.checks)
             if not risk.approved:

@@ -401,6 +401,13 @@ class TradingEngine:
             strategy_status=self._strategy_status(),
             symbol_resolved=True,
             spec_unchanged=True,
+            # Hand the sizer an independent second opinion on what a loss costs. Without
+            # it PositionSizer's cross-check never runs, and a symbol spec whose tick
+            # value disagrees with its contract size and tick size sizes every position
+            # wrongly with nothing to catch it.
+            calc_profit=lambda direction, entry, stop: self.broker.calc_profit(
+                self.symbol, direction, 1.0, entry, stop
+            ),
         )
 
         result = self.pipeline.run(

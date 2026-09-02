@@ -443,3 +443,45 @@ class TestWeakeningAnyRequirementBlocksIt:
         )
         _, _, cls, _, _ = decide(perfect_snapshot(), weak)
         assert cls.classification is Classification.NO_TRADE
+
+
+class TestTheBrokerCrossCheckIsActuallyWired:
+    """PositionSizer refuses to trade when its own loss figure disagrees with the
+    broker's `calc_profit`. That is the only thing that catches a symbol specification
+    whose tick value does not match its contract size and tick size — a spec that looks
+    entirely normal and sizes every position wrongly.
+
+    The cross-check was implemented, tested in isolation, and never called: the pipeline
+    invoked the risk gate without passing the broker's figure at all, so it silently did
+    nothing for the whole of development.
+    """
+
+    def test_the_pipeline_asks_the_broker_what_a_loss_costs(self) -> None:
+        from xauusd.engine.pipeline import EngineState
+
+        asked: list[tuple] = []
+
+        def calc(direction, entry, stop):  # type: ignore[no-untyped-def]
+            asked.append((direction, entry, stop))
+            return -100.0
+
+        state = EngineState(calc_profit=calc)
+        plan = perfect_plan()
+        from xauusd.engine.pipeline import DecisionPipeline
+
+        got = DecisionPipeline._broker_loss_for_one_lot(state, plan)
+        assert got == -100.0
+        assert asked == [(plan.direction, plan.entry, plan.stop_loss)]
+
+    def test_no_broker_answer_does_not_block_evaluation(self) -> None:
+        """Corroboration, not a precondition: a broker that cannot answer must not stop
+        the engine. The sizer already refuses when the answer DISAGREES."""
+        from xauusd.engine.pipeline import DecisionPipeline, EngineState
+
+        assert DecisionPipeline._broker_loss_for_one_lot(EngineState(), perfect_plan()) is None
+
+        def explodes(direction, entry, stop):  # type: ignore[no-untyped-def]
+            raise RuntimeError("bridge down")
+
+        state = EngineState(calc_profit=explodes)
+        assert DecisionPipeline._broker_loss_for_one_lot(state, perfect_plan()) is None

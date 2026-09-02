@@ -718,3 +718,44 @@ sure they look right" is a reasonable thing to write and an unreasonable thing t
 particularly when the two cases differ only in a field the report did not print. If a
 document tells an operator to verify something mechanical, the machine should be
 verifying it.
+
+---
+
+## 30. The cross-check that answers "is this tick value real?" was never called
+
+A first live connection reported `tick_value_loss=0.1` against `contract_size=100.0`.
+Whether that is correct depends entirely on tick size — 0.10 is right for gold quoted to
+three decimals and ten times too small for two — and every position size in the system
+derives from it.
+
+The system was built for exactly this. `PositionSizer.calculate` takes
+`broker_calc_profit`, the broker's own answer to "what does one lot lose between these
+two prices?", compares it against its own arithmetic, and returns
+`approved=False, reason="...refusing to trade on a specification we cannot verify"` when
+they disagree beyond `sizing_cross_check_tolerance`. It has a unit test. It works.
+
+`DecisionPipeline` called `risk_gate.evaluate(...)` without that argument. It defaulted
+to `None`, the cross-check skipped itself, and the single defence against an incoherent
+symbol specification did nothing for the entire development of the project — including
+through the full backtest, the validation suite, and the parity test.
+
+This is finding 17 again in a different place, and the resemblance is the point:
+
+- **Finding 17:** the dashboard's HALT/FLATTEN wrote to a queue nothing read.
+- **Here:** the sizer reads a parameter nothing wrote.
+
+Both are a complete, correct, tested implementation of one half of a contract, with no
+counterpart. Both look finished from either end. Neither had a test that crossed the
+boundary — the sizer's test supplied `broker_calc_profit` directly, which proves the
+comparison works and says nothing about whether anyone performs it.
+
+`EngineState` now carries a `calc_profit` callable, the orchestrator supplies the
+broker's, and the pipeline passes the result on every sizing. A broker that cannot answer
+still yields `None`: the cross-check is corroboration, not a precondition, and an
+unavailable broker must not stop the engine evaluating. Disagreement is what refuses the
+trade, and that is now reachable.
+
+**Class of bug:** a test that stops at the seam. Every unit test here passed because each
+side was exercised with its counterpart hand-supplied. The question worth asking of any
+optional parameter that carries a safety property: what test would fail if nobody ever
+passed it? If the answer is "none", nobody does.
