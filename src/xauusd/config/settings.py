@@ -22,10 +22,33 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 from xauusd.domain.enums import Mode, Regime, Session, Timeframe
 
 
-class RiskConfig(BaseModel):
-    """Hard risk limits. These are invariants, not preferences."""
+class ConfigSection(BaseModel):
+    """Base for every configuration section.
+
+    A blank line in `.env` means the setting is NOT SET, not that it is an empty string.
+    `.env.example` ships blanks on purpose — they show an operator which keys exist —
+    and once `.env` was actually being read those blanks started reaching pydantic as
+    "". A `str | None` field tolerates that; `broker.login`, an `int | None`, does not,
+    and setup died on `unable to parse string as an integer` before it printed anything
+    an operator could act on.
+
+    Dropping the key entirely is what makes a blank behave like an absent line: the
+    field's default applies, and a genuinely required field still reports itself as
+    missing rather than as malformed.
+    """
 
     model_config = {"frozen": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_means_unset(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if v != ""}
+        return data
+
+
+class RiskConfig(ConfigSection):
+    """Hard risk limits. These are invariants, not preferences."""
 
     risk_pct_a: float = Field(0.01, gt=0, le=0.02)
     risk_pct_a_plus: float = Field(0.02, gt=0, le=0.02)
@@ -68,9 +91,7 @@ class RiskConfig(BaseModel):
         return self
 
 
-class ExecutionConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class ExecutionConfig(ConfigSection):
     max_spread_points: float = Field(50.0, gt=0)
     max_spread_ratio: float = Field(2.5, gt=1.0, description="vs rolling median spread")
     max_quote_age_seconds: float = Field(10.0, gt=0)
@@ -96,10 +117,8 @@ class ExecutionConfig(BaseModel):
     weekend_flat_minutes_before_close: int = Field(90, ge=0)
 
 
-class StrategyThresholds(BaseModel):
+class StrategyThresholds(ConfigSection):
     """Classification thresholds. Set from validation output, never guessed live."""
-
-    model_config = {"frozen": True}
 
     a_score_min: float = Field(70.0, ge=0, le=100)
     a_plus_score_min: float = Field(85.0, ge=0, le=100)
@@ -129,7 +148,7 @@ class StrategyThresholds(BaseModel):
         return self
 
 
-class ScoringWeights(BaseModel):
+class ScoringWeights(ConfigSection):
     """The 100-point allocation. Optimised in validation, not assumed correct.
 
     NOTE: the weights given as an example in the original brief total 95, not 100
@@ -138,8 +157,6 @@ class ScoringWeights(BaseModel):
     context into a fill and deserves parity with support_resistance. The validator
     enforces the 100 total so this class of error cannot recur silently.
     """
-
-    model_config = {"frozen": True}
 
     htf_bias: float = 15.0
     market_structure: float = 15.0
@@ -193,10 +210,8 @@ class ScoringWeights(BaseModel):
         }
 
 
-class StructureConfig(BaseModel):
+class StructureConfig(ConfigSection):
     """Objective definitions for the market-structure engine. See docs/specs/."""
-
-    model_config = {"frozen": True}
 
     swing_lookback: int = Field(2, ge=1, le=10, description="Bars either side of a fractal.")
     swing_min_atr: float = Field(
@@ -211,9 +226,7 @@ class StructureConfig(BaseModel):
     max_swings_tracked: int = Field(40, ge=4)
 
 
-class LiquidityConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class LiquidityConfig(ConfigSection):
     equal_level_tolerance_atr: float = Field(0.10, gt=0, le=1.0)
     min_equal_touches: int = Field(2, ge=2)
     sweep_min_penetration_atr: float = Field(0.05, ge=0)
@@ -226,9 +239,7 @@ class LiquidityConfig(BaseModel):
     displacement_after_sweep_atr: float = Field(0.5, ge=0)
 
 
-class FVGConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class FVGConfig(ConfigSection):
     min_size_atr: float = Field(0.15, gt=0)
     min_displacement_atr: float = Field(0.5, ge=0)
     mitigation_threshold: float = Field(
@@ -239,9 +250,7 @@ class FVGConfig(BaseModel):
     prefer_consequent_encroachment: bool = True
 
 
-class OrderBlockConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class OrderBlockConfig(ConfigSection):
     require_bos: bool = True
     min_displacement_atr: float = Field(0.6, ge=0)
     max_lookback_bars: int = Field(50, ge=5)
@@ -250,18 +259,14 @@ class OrderBlockConfig(BaseModel):
     use_wick_extremes: bool = True
 
 
-class SRConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class SRConfig(ConfigSection):
     cluster_tolerance_atr: float = Field(0.35, gt=0)
     min_touches: int = Field(2, ge=1)
     lookback_bars: dict[str, int] = Field(default_factory=lambda: {"D1": 250, "H4": 400, "H1": 500})
     recency_halflife_bars: int = Field(200, ge=10)
 
 
-class SessionConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class SessionConfig(ConfigSection):
     asia_start_utc_hour: int = 23
     asia_end_utc_hour: int = 7
     london_local_start: str = "08:00"
@@ -280,9 +285,7 @@ class SessionConfig(BaseModel):
     block_last_minutes_of_week: int = Field(120, ge=0)
 
 
-class RegimeConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class RegimeConfig(ConfigSection):
     adx_period: int = 14
     strong_trend_adx: float = 30.0
     moderate_trend_adx: float = 20.0
@@ -305,9 +308,7 @@ class RegimeConfig(BaseModel):
     )
 
 
-class NewsConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class NewsConfig(ConfigSection):
     blackout_minutes_before: dict[str, int] = Field(
         default_factory=lambda: {"CRITICAL": 60, "HIGH": 30, "MEDIUM": 15, "LOW": 0}
     )
@@ -336,9 +337,7 @@ class NewsConfig(BaseModel):
     )
 
 
-class DataConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class DataConfig(ConfigSection):
     symbol_override: str | None = None
     symbol_patterns: list[str] = Field(default_factory=lambda: [r"^XAU", r"^GOLD"])
     analysis_timeframes: list[Timeframe] = Field(
@@ -379,9 +378,7 @@ class DataConfig(BaseModel):
     )
 
 
-class BrokerConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class BrokerConfig(ConfigSection):
     kind: Literal["mt5_grpc", "mt5_direct", "sim", "paper"] = "sim"
     bridge_address: str = "127.0.0.1:50551"
     terminal_path: str | None = None
@@ -393,17 +390,13 @@ class BrokerConfig(BaseModel):
     max_health_failures: int = 3
 
 
-class DatabaseConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class DatabaseConfig(ConfigSection):
     url: str = "sqlite:///data/xauusd.db"
     echo: bool = False
     pool_size: int = 5
 
 
-class AlertConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class AlertConfig(ConfigSection):
     telegram_enabled: bool = False
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
@@ -416,12 +409,10 @@ class AlertConfig(BaseModel):
     min_level: str = "WARNING"
 
 
-class DashboardConfig(BaseModel):
+class DashboardConfig(ConfigSection):
     """The dashboard is the only component with a network listener and two write paths
     (halt, flatten). Both properties make it the attack surface, so the bind address and
     the token are validated together rather than left to the operator to get right."""
-
-    model_config = {"frozen": True}
 
     host: str = "127.0.0.1"
     port: int = 8000
@@ -544,6 +535,14 @@ class Settings(BaseSettings):
             YamlSettingsSource(settings_cls),
             file_secret_settings,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_means_unset(cls, data: Any) -> Any:
+        """Same rule as ConfigSection, for the top-level settings."""
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if v != ""}
+        return data
 
     @model_validator(mode="after")
     def _live_requires_mode(self) -> Settings:

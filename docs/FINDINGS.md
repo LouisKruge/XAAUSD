@@ -587,3 +587,39 @@ right, no other line in the report means anything.
 **Class of bug:** diagnostics that describe state without identifying their subject. A
 report that cannot be attributed to a specific installation cannot be trusted at all once
 more than one exists, and more than one always eventually exists.
+
+---
+
+## 26. The file we ship was the file that broke startup
+
+Setup got as far as the new database check and then died inside pydantic:
+
+    broker.login
+      Input should be a valid integer, unable to parse string as an integer
+      [type=int_parsing, input_value='', input_type=str]
+
+`.env.example` ships blank keys on purpose — they show an operator which settings exist
+and where to type. `XAUUSD_BROKER__LOGIN=` is one of them. For as long as nothing read
+`.env` (finding 23) that blank was invisible. The moment the file was actually read, an
+empty string arrived at an `int | None` field, and pydantic — correctly — refused it.
+
+So the shipped example file could not be loaded by the code that shipped with it. Every
+`str | None` key tolerated the blank; the one integer key did not.
+
+The fix is a `mode="before"` validator on a shared `ConfigSection` base (and on `Settings`
+itself) that **drops keys whose value is an empty string**. Dropping rather than coercing
+is what makes a blank behave like a line that was never there: the field's default
+applies, and a genuinely required field still reports itself as *missing* rather than
+*malformed*. Only `""` counts as unset — `0` and `false` are real values, and there is a
+test saying so.
+
+This is the third consequence of finding 23, after 24 and 25, and the pattern across all
+three is the same: a config source that had never been consulted was switched on, and
+everything that had been quietly depending on being ignored surfaced at once — a stale
+URL, a second installation, a blank line in the template. None of them were new bugs. They
+were all pre-existing state that only became reachable.
+
+**Class of bug:** shipping an example file that no test ever loads. `.env.example` is
+executable configuration, not documentation, and it now has a test that loads it exactly
+as an operator would. Worth asking of any template a project ships: does anything actually
+run it?

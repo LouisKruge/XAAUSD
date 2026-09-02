@@ -263,3 +263,51 @@ class TestTheEnvFileChoosesTheConfigEnvironment:
         cfg.mkdir()
         (cfg / "base.yaml").write_text("symbol: BASE\n")
         assert load_settings(config_dir=cfg).env == "dev"
+
+
+class TestABlankLineMeansNotSet:
+    """`.env.example` ships blanks deliberately — they show which keys exist.
+
+    Once `.env` was actually being read, those blanks reached pydantic as "". A
+    `str | None` field tolerates it; `broker.login`, an `int | None`, does not, and
+    setup died on "unable to parse string as an integer" before printing anything an
+    operator could act on. A blank must behave exactly like an absent line.
+    """
+
+    def test_a_stock_env_example_loads(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """The file we ship must not be the file that breaks startup."""
+        monkeypatch.chdir(tmp_path)
+        example = Path(__file__).resolve().parents[2] / ".env.example"
+        (tmp_path / ".env").write_text(example.read_text())
+        (tmp_path / "config").mkdir()
+
+        settings = load_settings(config_dir=tmp_path / "config")
+        assert settings.broker.login is None
+
+    def test_a_blank_integer_becomes_none(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("XAUUSD_BROKER__LOGIN=\n")
+        assert Settings().broker.login is None
+
+    def test_a_blank_string_becomes_the_default(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("XAUUSD_SYMBOL=\n")
+        assert Settings().symbol == "XAUUSD", "a blank must not blank out a default"
+
+    def test_a_filled_value_still_wins(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("XAUUSD_BROKER__LOGIN=112061848\n")
+        assert Settings().broker.login == 112061848
+
+    def test_sections_are_still_immutable(self) -> None:
+        """The shared base must not have quietly dropped frozen=True."""
+        with pytest.raises(ValidationError):
+            RiskConfig().risk_pct_a = 0.10  # type: ignore[misc]
+        with pytest.raises(ValidationError):
+            Settings().symbol = "XAGUSD"  # type: ignore[misc]
+
+    def test_a_zero_is_not_treated_as_blank(self, tmp_path, monkeypatch) -> None:
+        """Only the empty string is 'unset'. 0 and false are real values."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("XAUUSD_LOG_JSON=false\n")
+        assert Settings().log_json is False
