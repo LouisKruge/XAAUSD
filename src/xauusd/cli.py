@@ -78,6 +78,14 @@ def build_broker(settings: Settings):  # type: ignore[no-untyped-def]
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Pre-flight check. Run this before anything else on a new machine."""
     settings = load_settings(env=args.env)
+    # WHERE this is running from, first. Two installations on one machine — an
+    # unzipped copy and a re-downloaded one — is easy to end up with and impossible to
+    # spot from a report that never says which folder produced it. That confusion
+    # invalidates every other line here.
+    from xauusd import __version__ as app_version
+
+    print(f"install          : {Path.cwd()}")
+    print(f"version          : {app_version}")
     print(
         f"config           : env={settings.env} mode={settings.mode} hash={settings.config_hash()}"
     )

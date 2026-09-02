@@ -553,3 +553,37 @@ alembic and:
 existing state was written under the old rules. The migration was the work, and the code
 change only looked like the work. Fixing a config mechanism means asking what the broken
 version already wrote, and where.
+
+---
+
+## 25. Two installations, and a report that could not tell you which one you were reading
+
+An operator sent three screenshots at once: a `.env` being edited under
+`OneDrive\Documentos\...`, a setup traceback from `Downloads\...`, and a pre-flight report
+showing `env=dev`, `kind=sim` and the same config hash as their very first run days
+earlier.
+
+Three artefacts, three different installations. They were editing one copy, running setup
+in a second, and reading a dashboard served by a third — the original, still running, on
+code from before any of the fixes. Every diagnosis drawn from that report was worthless,
+and nothing in it said so.
+
+This is an ordinary thing to end up with. Unzip once, re-download later, and a machine has
+two complete copies with separate `.env` files, separate databases and separate Python
+environments. Nothing about the pre-flight output distinguished them: it named the config
+environment, the database URL and the broker, but never the folder any of it came from.
+
+`doctor` now leads with the install path and version:
+
+    install : C:\xauusd
+    version : 0.1.0
+    config  : env=demo mode=DEMO hash=...
+
+Both lines exist for the same reason as the `.env` line added in finding 23: a report
+that is confidently wrong is worse than one that fails. The path answers "which copy is
+this?" and the version answers "is this the code I just installed?" — and until both are
+right, no other line in the report means anything.
+
+**Class of bug:** diagnostics that describe state without identifying their subject. A
+report that cannot be attributed to a specific installation cannot be trusted at all once
+more than one exists, and more than one always eventually exists.
