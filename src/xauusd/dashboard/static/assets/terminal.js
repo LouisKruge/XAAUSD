@@ -255,7 +255,13 @@ function authHeaders(extra) {
 }
 
 function promptForToken() {
-  const t = prompt('This dashboard requires an access token.');
+  // Name the file and the key. A bare "requires an access token" leaves the operator
+  // hunting for a secret they were never told had been created.
+  const t = prompt(
+    'This dashboard needs its access token.\n\n'
+    + 'Open the .env file in your installation folder, find the line\n'
+    + 'XAUUSD_DASHBOARD__AUTH_TOKEN=  and paste everything after the "=".\n\n'
+    + 'To remove this prompt entirely on a local install, delete that line and restart.');
   if (!t) return false;
   try { localStorage.setItem('xauusd_token', t.trim()); } catch (e) { return false; }
   return true;

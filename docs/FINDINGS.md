@@ -660,3 +660,61 @@ around it instead discarded the accumulated knowledge in the function — which 
 what a shared constructor is for. Worth asking when writing `create_engine`, `open`, or
 any other primitive: does this codebase already have a wrapper for this, and what does it
 know that I am about to forget?
+
+---
+
+## 28. A token nobody asked for, guarding a page only its owner could reach
+
+The first thing an operator saw after a successful install was a browser prompt:
+*"This dashboard requires an access token."* No indication of what token, or where it
+came from.
+
+Setup generated one. `DashboardConfig` says, in its own docstring, that a token is
+unnecessary on loopback because the OS is the boundary — and then setup created one
+anyway, and the middleware enforced it, so a page reachable only from that machine was
+password-protected by a secret the operator had never been told existed.
+
+Setup no longer generates a dashboard token. A non-loopback bind still *requires* one
+and is refused at startup without it, which is the guardrail that actually matters; an
+operator who wants remote access sets a token then. A token already present is respected
+untouched. The browser prompt, for anyone who has one, now names the file and the key
+rather than asking for a secret in the abstract.
+
+**Class of bug:** a security control applied where the threat model says it is not
+needed, whose only effect is friction on the legitimate user. The bind check was the
+real control all along; the generated token was cargo.
+
+---
+
+## 29. "DEGRADED", with no indication of what was degraded
+
+First successful MT5 connection, and the pre-flight said:
+
+    broker : DEGRADED (kind=mt5_grpc) login=5055396348 equity=1000.00 USD
+
+`BrokerHealth.is_ok` is `connected and trade_allowed and trade_expert`. Three unrelated
+conditions with three unrelated fixes — the terminal is offline, the account cannot
+trade, or the AutoTrading button is off — collapsed into one word that distinguishes
+none of them. `doctor` now names the failing flag and what to do about it.
+
+The same report also carried:
+
+    symbol spec : contract=100.0 tick_value_loss=0.1
+
+The deployment runbook has, from the beginning, instructed the operator to *read those
+numbers*. But the line omitted `tick_size`, without which the numbers cannot be read: a
+tick value of 0.10 is correct for a broker quoting gold to three decimals
+(100 × 0.001 = 0.10) and wrong by a factor of ten for one quoting two
+(100 × 0.01 = 1.00). Identical output, and in one case every position size is ten times
+too large.
+
+So the check is now arithmetic rather than an instruction. `doctor` prints `digits` and
+`tick_size`, computes `contract_size × tick_size`, compares it against the broker's own
+`tick_value_loss`, and **fails the pre-flight** on a mismatch with "do not trade until it
+is explained". A spec the system cannot size against is not a warning.
+
+**Class of bug:** documentation standing in for a check. "Read those numbers and make
+sure they look right" is a reasonable thing to write and an unreasonable thing to expect,
+particularly when the two cases differ only in a field the report did not print. If a
+document tells an operator to verify something mechanical, the machine should be
+verifying it.

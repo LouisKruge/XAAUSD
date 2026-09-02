@@ -121,3 +121,49 @@ class TestTheBridgeReadsTheConfiguredAccount:
         assert seen["login"] is None
         combined = capsys.readouterr()
         assert "bridge_no_login_configured" in (combined.out + combined.err)
+
+
+class TestTheSpecIsCheckedForCoherence:
+    """A one-tick move on one lot is worth contract_size * tick_size. Every position
+    size derives from tick_value, so a broker whose own numbers disagree with that
+    arithmetic cannot be sized against — and no operator spots it by eye."""
+
+    def test_a_coherent_spec_passes(self, capsys) -> None:  # type: ignore[no-untyped-def]
+        from xauusd.cli import main
+
+        assert main(["doctor"]) == 0
+        out = capsys.readouterr().out
+        assert "consistent: 1 tick on 1 lot" in out
+
+    def test_an_incoherent_spec_is_flagged_and_fails(self, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+        """contract=100 with tick_size=0.01 implies 1.00, not 0.10."""
+        import xauusd.cli as cli
+        from xauusd.domain.types import SymbolSpec
+
+        real = cli.build_broker
+
+        def broker_with_bad_spec(settings):  # type: ignore[no-untyped-def]
+            b = real(settings)
+            bad = SymbolSpec(
+                settings.symbol,
+                2,
+                0.01,
+                100.0,
+                0.01,
+                0.1,
+                0.1,
+                0.1,  # tick values ten times too small
+                0.01,
+                50.0,
+                0.01,
+                10,
+                5,
+            )
+            monkeypatch.setattr(b, "symbol_spec", lambda _s: bad)
+            return b
+
+        monkeypatch.setattr(cli, "build_broker", broker_with_bad_spec)
+        assert cli.main(["doctor"]) == 1, "an unsizeable spec must not report READY"
+        out = capsys.readouterr().out
+        assert "MISMATCH" in out
+        assert "do not trade" in out

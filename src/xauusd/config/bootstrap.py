@@ -16,8 +16,14 @@ import shutil
 from pathlib import Path
 
 # Keys that must have a value, and how many bytes of entropy to generate for each.
+#
+# The dashboard token is NOT here on purpose. The dashboard binds to loopback, where
+# DashboardConfig itself says a token is unnecessary — the OS is the boundary. Generating
+# one anyway meant the first thing an operator saw was a password prompt for a secret
+# nobody had told them existed, guarding a page only they could reach. A non-loopback
+# bind still requires a token, and is refused at startup without one, which is the
+# guardrail that actually matters.
 GENERATED_SECRETS = {
-    "XAUUSD_DASHBOARD__AUTH_TOKEN": 32,
     "POSTGRES_PASSWORD": 24,
 }
 

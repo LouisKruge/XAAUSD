@@ -35,11 +35,26 @@ class TestGeneratesOnlyWhatIsMissing:
         assert parse_env((tmp_path / ".env").read_text())["XAUUSD_ENV"] == "dev"
 
     def test_it_fills_in_blank_secrets(self, tmp_path: Path) -> None:
-        write(tmp_path, ".env.example", "POSTGRES_PASSWORD=\nXAUUSD_DASHBOARD__AUTH_TOKEN=\n")
+        write(tmp_path, ".env.example", "POSTGRES_PASSWORD=\n")
         ensure_env_file(tmp_path)
-        parsed = parse_env((tmp_path / ".env").read_text())
-        assert len(parsed["POSTGRES_PASSWORD"]) >= 16
-        assert len(parsed["XAUUSD_DASHBOARD__AUTH_TOKEN"]) >= 16
+        assert len(parse_env((tmp_path / ".env").read_text())["POSTGRES_PASSWORD"]) >= 16
+
+    def test_no_dashboard_token_is_generated_for_a_loopback_install(self, tmp_path: Path) -> None:
+        """The dashboard binds to loopback, where a token buys nothing. Generating one
+        meant the first thing an operator saw was a password prompt for a secret nobody
+        had told them existed, guarding a page only they could reach."""
+        write(tmp_path, ".env.example", "XAUUSD_DASHBOARD__AUTH_TOKEN=\n")
+        ensure_env_file(tmp_path)
+        assert not parse_env((tmp_path / ".env").read_text()).get("XAUUSD_DASHBOARD__AUTH_TOKEN")
+
+    def test_a_token_the_operator_set_is_still_respected(self, tmp_path: Path) -> None:
+        """Someone who wants remote access sets one; nothing here may discard it."""
+        write(tmp_path, ".env.example", "")
+        write(tmp_path, ".env", "XAUUSD_DASHBOARD__AUTH_TOKEN=" + "k" * 40 + "\n")
+        ensure_env_file(tmp_path)
+        assert (
+            parse_env((tmp_path / ".env").read_text())["XAUUSD_DASHBOARD__AUTH_TOKEN"] == "k" * 40
+        )
 
     def test_it_never_overwrites_an_existing_secret(self, tmp_path: Path) -> None:
         write(tmp_path, ".env.example", "POSTGRES_PASSWORD=\n")
@@ -57,7 +72,7 @@ class TestGeneratesOnlyWhatIsMissing:
 
     def test_it_is_idempotent(self, tmp_path: Path) -> None:
         """Setup is safe to double-click twice, which people do."""
-        write(tmp_path, ".env.example", "POSTGRES_PASSWORD=\nXAUUSD_DASHBOARD__AUTH_TOKEN=\n")
+        write(tmp_path, ".env.example", "POSTGRES_PASSWORD=\n")
         ensure_env_file(tmp_path)
         first = (tmp_path / ".env").read_text()
         ensure_env_file(tmp_path)

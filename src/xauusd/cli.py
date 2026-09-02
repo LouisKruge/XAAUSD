@@ -146,12 +146,55 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             f"(kind={settings.broker.kind}) login={account.login} "
             f"equity={account.equity:.2f} {account.currency}"
         )
+        if not health.is_ok:
+            # Name the failing flag. "DEGRADED" alone sends an operator hunting through
+            # three unrelated causes, only one of which is ever the real one.
+            checks = (
+                ("connected", health.connected, "the terminal is not connected to the broker"),
+                (
+                    "trade_allowed",
+                    health.trade_allowed,
+                    "the account may not trade (investor password, or the market is closed)",
+                ),
+                (
+                    "trade_expert",
+                    health.trade_expert,
+                    "AutoTrading is OFF — press the AutoTrading button in MT5",
+                ),
+            )
+            for name, value, fix in checks:
+                if not value:
+                    print(f"                   FAILING: {name} — {fix}")
+            if health.detail:
+                print(f"                   detail: {health.detail}")
+
         spec = broker.symbol_spec(settings.symbol)
         print(
-            f"symbol spec      : contract={spec.contract_size} "
-            f"tick_value_loss={spec.tick_value_loss} step={spec.volume_step} "
-            f"stops_level={spec.stops_level}"
+            f"symbol spec      : contract={spec.contract_size} digits={spec.digits} "
+            f"tick_size={spec.tick_size} tick_value_loss={spec.tick_value_loss}"
         )
+        print(
+            f"                   volume {spec.volume_min}-{spec.volume_max} "
+            f"step {spec.volume_step} | stops_level={spec.stops_level}"
+        )
+        # The one arithmetic check an operator cannot reasonably do by eye, and the one
+        # that decides every position size: a one-tick move on one lot is worth
+        # contract_size * tick_size in the profit currency. If the broker's own numbers
+        # disagree with that, sizing derived from them cannot be trusted.
+        implied = spec.contract_size * spec.tick_size
+        if spec.tick_value_loss > 0 and abs(implied - spec.tick_value_loss) > 0.01 * implied:
+            print(
+                f"                   MISMATCH: contract x tick_size = {implied:.4f} "
+                f"but the broker reports tick_value_loss={spec.tick_value_loss}. "
+                f"Position sizing derives from this — do not trade until it is explained."
+            )
+            ok = False
+        else:
+            print(
+                f"                   consistent: 1 tick on 1 lot = "
+                f"{spec.contract_size} x {spec.tick_size} = {implied:.2f} "
+                f"{spec.currency_profit}"
+            )
         if settings.mode is Mode.LIVE:
             armed, why = verify_live_arming(settings, account.login)
             print(f"live arming      : {'ARMED' if armed else 'NOT ARMED'} — {why}")
