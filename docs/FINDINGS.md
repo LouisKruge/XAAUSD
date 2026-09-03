@@ -846,3 +846,52 @@ missed in a row is a stopped engine.
 **Class of bug:** a status indicator measuring its own transport. The question worth
 asking of any health display: if the thing it describes died right now, what would this
 show? If the answer is "the same as before", it is not a health indicator.
+
+---
+
+## 33. The broker's own spec was internally inconsistent, and sizing read the wrong half
+
+MetaTrader's Specification dialog for XAUUSD on a MetaQuotes demo server:
+
+    Digits          2
+    Contract size   100
+    Tick size       0.01
+    Tick value      0.1
+    Calculation     CFD Leverage
+
+100 × 0.01 = **1.00**. The broker reports **0.10**. Two fields describing the same
+quantity, ten times apart, from the same dialog.
+
+`PositionSizer` uses `tick_value_loss`, via
+`value_per_price_unit = tick_value_loss / tick_size`. On this spec that yields $10 per
+lot per dollar of gold movement; the contract says $100. **Every position would have been
+sized ten times too large — a 1% risk placed as 10%, and the 2% daily drawdown limit
+breached by a single stop-out.**
+
+Three things are worth separating here.
+
+**The system read a field it was right to read.** `CLAUDE.md` requires that broker specs
+are "always read, never assumed", and `tick_value` is the correct field: it accounts for
+cross-currency conversion that `contract_size × tick_size` does not. The failure was not
+choosing the wrong field. It was trusting a single field with no corroboration for a
+number that determines every position size.
+
+**Guessing which half is right would be the same mistake.** Silently preferring
+`contract_size × tick_size` would be assuming a spec rather than reading it, and would be
+wrong for any symbol whose profit currency differs from the account currency. The system
+refuses instead: pre-flight reports NOT READY, and the sizer's cross-check (finding 30 —
+only wired the day before, and this is the first thing it caught) declines the trade.
+
+**The tie is broken by measurement, not by preference.** `doctor` now asks the broker to
+price a one-tick move on one lot via `OrderCalcProfit` and prints which of the two
+candidates it matches. That is the arithmetic the money actually follows, so a
+descriptive field being wrong is discoverable rather than merely suspicious.
+
+MetaQuotes demo servers ship generic instrument definitions; a real broker's demo does
+not usually have this defect. But the point is not this server. It is that a spec can be
+internally inconsistent, the wrong half can be the one sizing reads, and nothing about
+the resulting behaviour looks abnormal — the bot places orders, they fill, the numbers
+are simply all ten times too big.
+
+**Class of bug:** trusting a single unverified input for a quantity where being wrong is
+unbounded. The check costs one broker call at startup. Not doing it costs the account.

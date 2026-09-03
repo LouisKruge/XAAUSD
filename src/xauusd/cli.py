@@ -26,7 +26,7 @@ from pydantic import ValidationError
 from xauusd.config.settings import Settings, load_settings, verify_live_arming
 from xauusd.database.repositories import Repositories
 from xauusd.database.session import Database
-from xauusd.domain.enums import Mode
+from xauusd.domain.enums import Direction, Mode
 from xauusd.monitoring.alerts import Notifier
 from xauusd.monitoring.logging import configure_logging, get_logger
 
@@ -182,11 +182,40 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         # contract_size * tick_size in the profit currency. If the broker's own numbers
         # disagree with that, sizing derived from them cannot be trusted.
         implied = spec.contract_size * spec.tick_size
-        if spec.tick_value_loss > 0 and abs(implied - spec.tick_value_loss) > 0.01 * implied:
+        mismatch = spec.tick_value_loss > 0 and abs(implied - spec.tick_value_loss) > 0.01 * implied
+
+        # Ask the broker to settle it. OrderCalcProfit is what the terminal would
+        # actually credit or debit, which outranks any descriptive field: a spec can be
+        # filled in wrongly, but this is the arithmetic the money follows.
+        measured: float | None = None
+        try:
+            quote = broker.quote(settings.symbol)
+            measured = broker.calc_profit(
+                settings.symbol, Direction.LONG, 1.0, quote.ask, quote.ask + spec.tick_size
+            )
+        except Exception as exc:
+            print(f"                   (broker could not price a test tick: {exc})")
+
+        if mismatch:
             print(
                 f"                   MISMATCH: contract x tick_size = {implied:.4f} "
-                f"but the broker reports tick_value_loss={spec.tick_value_loss}. "
-                f"Position sizing derives from this — do not trade until it is explained."
+                f"but the broker reports tick_value_loss={spec.tick_value_loss} "
+                f"({implied / spec.tick_value_loss:.0f}x apart)"
+            )
+            if measured is not None:
+                truth = (
+                    "contract x tick_size"
+                    if abs(measured - implied) < abs(measured - spec.tick_value_loss)
+                    else "tick_value_loss"
+                )
+                print(
+                    f"                   broker prices a 1-tick move on 1 lot at "
+                    f"{measured:.4f} {spec.currency_profit} — which matches {truth}"
+                )
+            print(
+                "                   Sizing uses tick_value_loss, so every position would "
+                "be wrong by that factor. Do not trade this symbol until it is explained; "
+                "a different broker's demo is usually the fastest answer."
             )
             ok = False
         else:
@@ -194,6 +223,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"                   consistent: 1 tick on 1 lot = "
                 f"{spec.contract_size} x {spec.tick_size} = {implied:.2f} "
                 f"{spec.currency_profit}"
+                + (f" (broker prices it at {measured:.2f})" if measured is not None else "")
             )
         if settings.mode is Mode.LIVE:
             armed, why = verify_live_arming(settings, account.login)

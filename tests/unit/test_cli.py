@@ -135,8 +135,10 @@ class TestTheSpecIsCheckedForCoherence:
         out = capsys.readouterr().out
         assert "consistent: 1 tick on 1 lot" in out
 
-    def test_an_incoherent_spec_is_flagged_and_fails(self, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
-        """contract=100 with tick_size=0.01 implies 1.00, not 0.10."""
+    def test_the_metaquotes_demo_spec_is_flagged_and_fails(self, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+        """The exact spec a MetaQuotes demo reported: Digits 2, Contract 100,
+        Tick size 0.01, Tick value 0.1. Its own numbers are ten times apart, and sizing
+        reads the wrong one — a 1% risk would have been placed as 10%."""
         import xauusd.cli as cli
         from xauusd.domain.types import SymbolSpec
 
@@ -166,4 +168,5 @@ class TestTheSpecIsCheckedForCoherence:
         assert cli.main(["doctor"]) == 1, "an unsizeable spec must not report READY"
         out = capsys.readouterr().out
         assert "MISMATCH" in out
-        assert "do not trade" in out
+        assert "Do not trade this symbol" in out
+        assert "10x apart" in out
