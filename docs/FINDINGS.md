@@ -934,3 +934,44 @@ A resolution failure now says which patterns were tried and points at
 the same family as testing at the seam (finding 30): both sides work, the check passes,
 and nobody exercised the join. A pre-flight is only worth its output if it fails exactly
 when the real thing would.
+
+---
+
+## 35. A coherent spec that might be the wrong instrument entirely
+
+The second broker's `GOLD` specification is internally consistent — contract 100,
+tick size 0.01, tick value 1, and 100 × 0.01 = 1.00. The check from finding 33 passes,
+and sizing on this broker will be correct.
+
+The rest of the same dialog:
+
+    ISIN        US00181T1079
+    Exchange    XNYS
+    Sector      Basic Materials
+    Industry    Gold
+    Country     United States
+
+An ISIN, a New York Stock Exchange listing, a sector and an industry. Those are equity
+attributes. Spot gold has no ISIN and is not listed on the NYSE. `GOLD` is also the NYSE
+ticker for a gold mining company, and a broker offering both spot metal and share CFDs
+can easily have one symbol whose description says one thing and whose metadata says
+another.
+
+Nothing in the tradeable numbers distinguishes them. Contract size 100, tick size 0.01
+and tick value 1 describe *100 ounces of bullion at $0.01 increments* and *100 shares at
+$0.01 increments* equally well. Both are coherent. Both size correctly. Only one is the
+instrument the strategy was designed for, and a Smart-Money-Concepts model of liquidity
+sweeps and session ranges applied to a mining company's shares is nonsense that would
+still produce confident-looking trades.
+
+The price separates them absolutely: bullion is thousands of dollars an ounce, the shares
+tens. `sanity_check_quote` has always enforced a 400–20,000 band, and the engine calls it
+at startup — but `doctor` did not, which is finding 34 again in the same function, one
+line further down. The pre-flight now prints the quote and applies the same check, for
+real brokers only (the simulator legitimately has no market data until a backtest loads
+some, and failing on that would report the simulator's emptiness as a broker fault).
+
+**Class of bug:** validating a thing's properties without validating its identity. Every
+number was checked and every number was right, for an instrument that might not be the
+one anybody meant to trade. Worth asking after any consistency check passes: consistent
+*with what*, and is that the thing I think it is?

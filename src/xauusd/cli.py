@@ -28,7 +28,11 @@ from xauusd.config.settings import Settings, load_settings, verify_live_arming
 from xauusd.database.repositories import Repositories
 from xauusd.database.session import Database
 from xauusd.domain.enums import Direction, Mode
-from xauusd.execution.symbol_discovery import resolve_symbol
+from xauusd.execution.symbol_discovery import (
+    SymbolResolutionError,
+    resolve_symbol,
+    sanity_check_quote,
+)
 from xauusd.monitoring.alerts import Notifier
 from xauusd.monitoring.logging import configure_logging, get_logger
 
@@ -214,6 +218,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         # Ask the broker to settle it. OrderCalcProfit is what the terminal would
         # actually credit or debit, which outranks any descriptive field: a spec can be
         # filled in wrongly, but this is the arithmetic the money follows.
+        # The price is the only thing that proves the instrument is spot gold. A symbol
+        # can be named GOLD, described "SPOT Gold Ounce vs US Dollar", and carry an ISIN,
+        # NYSE listing and "Basic Materials" sector — because it is a mining company's
+        # shares. Its contract size, tick size and tick value would all still look
+        # perfectly reasonable. The quote is what separates them. The engine checks this
+        # at startup; a pre-flight that does not is checking a different thing again.
+        # Only for a real broker: SimBroker has no market data until a backtest loads
+        # some, so it quotes 0.0, and failing the pre-flight on that would be reporting
+        # the simulator's emptiness as a broker fault.
+        try:
+            q = broker.quote(symbol)
+            print(f"quote            : bid {q.bid} / ask {q.ask}")
+            if settings.broker.kind.startswith("mt5"):
+                sanity_check_quote(q.mid, symbol)
+        except SymbolResolutionError as exc:
+            print(f"                   NOT GOLD: {exc}")
+            print(
+                "                   A symbol can be named GOLD and be the mining "
+                "company's stock. Check the price against spot gold in MT5 and set "
+                "XAUUSD_DATA__SYMBOL_OVERRIDE to the right instrument."
+            )
+            ok = False
+        except Exception as exc:
+            print(f"quote            : unavailable — {exc}")
+
         measured: float | None = None
         try:
             quote = broker.quote(symbol)

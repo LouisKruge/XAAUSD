@@ -170,3 +170,60 @@ class TestTheSpecIsCheckedForCoherence:
         assert "MISMATCH" in out
         assert "Do not trade this symbol" in out
         assert "10x apart" in out
+
+
+class TestTheInstrumentIsProvedByItsPrice:
+    """A symbol can be named GOLD, described "SPOT Gold Ounce vs US Dollar", and carry
+    an ISIN, an NYSE listing and a "Basic Materials" sector — because it is a gold
+    mining company's shares. Contract size 100, tick size 0.01 and tick value 1 are all
+    perfectly reasonable for that too. The price is the only thing that separates a
+    $2,600 ounce of bullion from a $21 share, and the engine checks it at startup.
+    """
+
+    def test_a_mining_stock_price_fails_the_preflight(self, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+        from datetime import UTC, datetime
+
+        import xauusd.cli as cli
+        from xauusd.config.settings import load_settings
+        from xauusd.domain.types import Quote
+
+        settings = load_settings()
+        real_build = cli.build_broker
+
+        def broker_serving_a_stock(s):  # type: ignore[no-untyped-def]
+            b = real_build(settings)  # a sim broker, so no bridge is needed
+            b.raw_symbols = lambda p, o: [
+                {
+                    "name": "GOLD",
+                    "description": "SPOT Gold Ounce vs US Dollar",
+                    "path": "Stocks\\GOLD",
+                    "currency_profit": "USD",
+                    "trade_mode": 4,
+                    "digits": 2,
+                    "spread": 3,
+                    "visible": True,
+                }
+            ]
+            b.quote = lambda _s: Quote(datetime.now(UTC), 21.38, 21.42)
+            return b
+
+        monkeypatch.setattr(cli, "build_broker", broker_serving_a_stock)
+        # The check is for real brokers; the simulator legitimately quotes nothing.
+        monkeypatch.setenv("XAUUSD_BROKER__KIND", "mt5_grpc")
+        monkeypatch.setattr(
+            cli,
+            "load_settings",
+            lambda **kw: settings.model_copy(
+                update={"broker": settings.broker.model_copy(update={"kind": "mt5_grpc"})}
+            ),
+        )
+
+        assert cli.main(["doctor"]) == 1, "a $21 instrument must not pass as spot gold"
+        out = capsys.readouterr().out
+        assert "NOT GOLD" in out
+        assert "mining company" in out
+
+    def test_a_real_gold_price_passes(self) -> None:
+        from xauusd.execution.symbol_discovery import sanity_check_quote
+
+        sanity_check_quote(2648.35, "GOLD")  # must not raise
