@@ -23,6 +23,7 @@ class TestEveryAdvertisedCommandExists:
             "dashboard",
             "bridge",
             "backtest",
+            "harvest",
             "validate",
             "explain",
             "rejections",

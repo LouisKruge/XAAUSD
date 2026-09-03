@@ -96,17 +96,27 @@ class SampleDataJob(JobSpec):
 
 @dataclass
 class BacktestJob(JobSpec):
+    """`synthetic = 0` means "use the real history in the database".
+
+    This button could previously ONLY run synthetic data, and the pipeline suite
+    asserts synthetic data produces no trades. So the one backtest an operator could
+    reach was guaranteed to report zero trades and an empty equity curve, which reads
+    exactly like a broken strategy rather than like absent data.
+    """
+
     def argv(self, values: dict[str, int]) -> list[str]:
-        return [
-            sys.executable,
-            "-m",
-            "xauusd.cli",
-            "backtest",
-            "--synthetic",
-            str(values["synthetic"]),
-            "--step",
-            str(values["step"]),
-        ]
+        argv = [sys.executable, "-m", "xauusd.cli", "backtest", "--step", str(values["step"])]
+        if values["synthetic"]:
+            argv += ["--synthetic", str(values["synthetic"])]
+        return argv
+
+
+@dataclass
+class HarvestJob(JobSpec):
+    """Download real bars from the broker so a backtest can mean something."""
+
+    def argv(self, values: dict[str, int]) -> list[str]:
+        return [sys.executable, "-m", "xauusd.cli", "harvest", "--bars", str(values["bars"])]
 
 
 JOBS: dict[str, JobSpec] = {
@@ -139,11 +149,27 @@ JOBS: dict[str, JobSpec] = {
         ),
         params={"synthetic": (60000, 5000, 400000), "step": (3, 1, 60)},
     ),
+    "harvest": HarvestJob(
+        key="harvest",
+        title="Download price history",
+        description=(
+            "Pulls real M5 bars from your broker into the database. Needed before a "
+            "backtest means anything: generated data contains no genuine market "
+            "structure, so a backtest over it correctly finds no setups. Requires the "
+            "MT5 bridge to be running. A few minutes for 60,000 bars."
+        ),
+        params={"bars": (60000, 5000, 400000)},
+    ),
     "backtest": BacktestJob(
         key="backtest",
         title="Run a backtest",
-        description="A single backtest over generated data, with the metrics report.",
-        params={"synthetic": (30000, 5000, 400000), "step": (6, 1, 60)},
+        description=(
+            "A single backtest with the metrics report. Leave 'synthetic' at 0 to use "
+            "the real history you downloaded — that is the only setting whose result "
+            "says anything about the strategy. A non-zero value generates that many "
+            "bars instead, which is a smoke test of the plumbing and nothing more."
+        ),
+        params={"synthetic": (0, 0, 400000), "step": (6, 1, 60)},
     ),
 }
 

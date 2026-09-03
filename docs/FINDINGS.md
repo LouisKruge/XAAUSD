@@ -975,3 +975,50 @@ some, and failing on that would report the simulator's emptiness as a broker fau
 number was checked and every number was right, for an instrument that might not be the
 one anybody meant to trade. Worth asking after any consistency check passes: consistent
 *with what*, and is that the thing I think it is?
+
+---
+
+## 36. The only backtest an operator could run was the one guaranteed to find nothing
+
+A backtest over 30,000 synthetic bars reported `0 trades`, and the rejection ledger
+accounted for every one of its 2,660 decisions as `NO_CANDIDATE` (1,452) or `session`
+(1,208). Read as a verdict on the strategy, that is alarming. It is not a verdict on
+anything.
+
+Instrumenting the confluence chain link by link over the same data: of 560 direction
+attempts, 280 died on higher-timeframe conflict (expected — one of two directions
+always conflicts), 100 on the sweep links, and **all 180 that reached the market
+structure shift died there.** Not one attempt ever reached the FVG link. The material
+was present — sweeps on 99% of instants, FVGs on 100%, order blocks on 99.8% — but an
+MSS requires a directional bias established by a BOS and then broken *against* with
+≥0.75 ATR of displacement, and a random walk does not produce that in coordination with
+a liquidity sweep 15 bars earlier. The chain is intact; the data has no structure for it
+to find.
+
+The suite already said so. `test_no_edge_data_produces_no_trades` asserts exactly this
+result. Synthetic data is a plumbing smoke test and the CLI prints "results are
+meaningless as a trading result" every run.
+
+The actual defect was upstream of all of it. `Broker.bars` could always fetch history
+and `BarRepository.upsert_many` could always store it, and **nothing ever introduced
+them**. There was no `harvest` command, no job, no script — the backtest's own error
+message told the operator to "Harvest history first" against a producer that did not
+exist. And `BacktestJob` hardcoded `--synthetic`, so the dashboard button could not have
+run real data even if the database were full. The one backtest reachable from the
+product was the one the test suite asserts finds nothing.
+
+So "0 trades" was reporting the absence of data while looking exactly like the absence
+of edge, and the two demand opposite responses: one is fixed by downloading history, the
+other by changing the strategy. An operator who read it the second way would have gone
+looking for thresholds to loosen — which is the one change this system must never make.
+
+**Class of bug:** the fifth producer/consumer pair in this project where both halves were
+complete, tested, and never connected (after HALT/FLATTEN, `calc_profit`, state
+publishing, and engine liveness). The tell is the same every time: an error message or a
+docstring that names a step no code performs. Grep the imperatives in user-facing strings
+and check that something implements each one.
+
+**Second-order lesson:** a smoke-test fixture became the default path to a headline
+number. `synthetic` now defaults to 0 (real history) in the job catalogue, so the easy
+button gives a meaningful answer or an honest complaint about missing data — never a
+confident-looking zero.

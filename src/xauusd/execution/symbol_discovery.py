@@ -167,3 +167,24 @@ def sanity_check_quote(price: float, symbol: str) -> None:
             f"{symbol} quoted at {price}, outside the plausible gold range {lo}-{hi}. "
             f"This is probably not spot gold."
         )
+
+
+def resolve_broker_symbol(broker: Any, settings: Any) -> str:
+    """The symbol name the engine would trade, for anything that must agree with it.
+
+    Harvesting under a different name than the engine trades stores history nothing
+    ever reads — the backtest reports "not enough bars" while the table is full. The
+    engine, `doctor` and the harvester have each resolved the symbol independently
+    before, and twice that divergence surfaced as a bug on a real broker, so new
+    callers go through here.
+
+    A broker with no `raw_symbols` (the simulator) has nothing to discover; the
+    configured name is correct for it.
+    """
+    raw = getattr(broker, "raw_symbols", None)
+    if raw is None:
+        return str(settings.symbol)
+    candidates = raw(settings.data.symbol_patterns, settings.data.symbol_override)
+    return resolve_symbol(
+        candidates, settings.data.symbol_patterns, settings.data.symbol_override
+    ).name

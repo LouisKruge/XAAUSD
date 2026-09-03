@@ -30,6 +30,7 @@ from xauusd.database.session import Database
 from xauusd.domain.enums import Direction, Mode
 from xauusd.execution.symbol_discovery import (
     SymbolResolutionError,
+    resolve_broker_symbol,
     resolve_symbol,
     sanity_check_quote,
 )
@@ -478,13 +479,68 @@ def _load_data(args: argparse.Namespace, settings: Settings) -> dict:
         bars = repos.bars.load(settings.symbol, Timeframe.M5, source=args.source)
     if len(bars) < 5000:
         raise SystemExit(
-            f"only {len(bars)} M5 bars in the database for {settings.symbol}. "
-            f"Harvest history first, or pass --synthetic N for a smoke run."
+            f"only {len(bars)} M5 bars in the database for {settings.symbol}.\n"
+            f"Download history first: dashboard System tab -> 'Download price "
+            f"history', or `xauusd harvest`. The MT5 bridge must be running.\n"
+            f"`--synthetic N` runs a smoke test instead, but generated data has no "
+            f"genuine market structure, so it correctly produces no trades."
         )
     m5 = BarSeries.from_bars(Timeframe.M5, bars)
     return build_timeframes(
         m5, [Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1, Timeframe.W1]
     )
+
+
+def cmd_harvest(args: argparse.Namespace) -> int:
+    """Pull real bar history from the broker into the database.
+
+    Without this the only runnable backtest is `--synthetic`, and the pipeline suite
+    asserts synthetic data produces no trades. An operator reading "0 trades" then has
+    no way to tell a selective strategy from an empty database.
+    """
+    configure_logging("WARNING", json_output=False)
+    settings = load_settings(env=args.env)
+
+    from xauusd.data.harvest import coverage, harvest
+    from xauusd.domain.enums import Timeframe
+
+    db = Database(settings.database.url)
+    broker = build_broker(settings)
+    symbol = resolve_broker_symbol(broker, settings)
+    held, first, last = coverage(db, symbol, Timeframe.M5, source=args.source)
+    print(f"symbol           : {symbol}")
+    print(
+        f"already held     : {held} M5 bars"
+        + (f"  ({first:%Y-%m-%d} -> {last:%Y-%m-%d})" if held else "")
+    )
+    print(f"requesting       : {args.bars} bars, newest first\n")
+
+    def show(done: int, want: int) -> None:
+        print(f"   {done:>7,} / {want:,}", end="\r", flush=True)
+
+    report = harvest(
+        broker,
+        db,
+        symbol,
+        Timeframe.M5,
+        wanted=args.bars,
+        source=args.source,
+        progress=show,
+    )
+
+    print(" " * 40, end="\r")
+    print(report.summary())
+
+    held, _, _ = coverage(db, symbol, Timeframe.M5, source=args.source)
+    print(f"\nheld now         : {held} M5 bars")
+    if held < 5000:
+        print(
+            "                   that is below the 5000 a backtest needs; run this "
+            "again when the terminal has more history loaded."
+        )
+        return 1
+    print("                   enough to backtest. Run a backtest without --synthetic.")
+    return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -667,6 +723,11 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--progress", type=int, default=5000)
     bt.add_argument("--json", default=None, help="write metrics to this path")
     bt.set_defaults(func=cmd_backtest)
+
+    hv = sub.add_parser("harvest", help="download real bar history from the broker")
+    hv.add_argument("--bars", type=int, default=60_000, help="how many M5 bars to hold")
+    hv.add_argument("--source", default="mt5")
+    hv.set_defaults(func=cmd_harvest)
 
     va = sub.add_parser("validate", help="run the full validation suite (the deployment gate)")
     va.add_argument("--synthetic", type=int, default=None, help="generate N synthetic M1 bars")

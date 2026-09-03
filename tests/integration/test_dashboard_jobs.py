@@ -35,6 +35,7 @@ class TestOnlyAllowlistedWorkRuns:
             "doctor",
             "validate",
             "backtest",
+            "harvest",
         }
 
     def test_no_job_reaches_a_shell(self) -> None:
@@ -46,6 +47,30 @@ class TestOnlyAllowlistedWorkRuns:
             assert argv[0].endswith("python") or "python" in argv[0]
             assert all(isinstance(a, str) for a in argv)
             assert not any(";" in a or "&&" in a or "|" in a for a in argv)
+
+
+class TestABacktestCanReachRealData:
+    """The backtest button could only ever pass --synthetic, and the pipeline suite
+    asserts synthetic data produces no trades. So the single backtest an operator could
+    reach was guaranteed to report 0 trades and an empty equity curve — which reads as a
+    broken strategy, not as the absent data it actually was."""
+
+    def test_zero_means_use_the_harvested_history(self) -> None:
+        argv = JOBS["backtest"].argv({"synthetic": 0, "step": 6})
+        assert "--synthetic" not in argv, "0 must fall through to the real database"
+
+    def test_a_nonzero_value_still_runs_the_smoke_test(self) -> None:
+        argv = JOBS["backtest"].argv({"synthetic": 30000, "step": 6})
+        assert argv[argv.index("--synthetic") + 1] == "30000"
+
+    def test_the_default_is_real_data(self) -> None:
+        """The default a browser gets when it sends no parameters. Pointing it at
+        generated data by default is what made "0 trades" look like a verdict."""
+        assert JOBS["backtest"].params["synthetic"][0] == 0
+
+    def test_harvest_asks_for_bars(self) -> None:
+        argv = JOBS["harvest"].argv({"bars": 60000})
+        assert argv[-2:] == ["--bars", "60000"]
 
 
 class TestParametersCannotEscapeTheirBounds:
@@ -158,4 +183,10 @@ class TestTheJobApiIsGuardedToo:
     def test_the_catalogue_is_served_with_the_token(self, client) -> None:  # type: ignore[no-untyped-def]
         r = client.get("/api/jobs/catalogue", headers=AUTH)
         assert r.status_code == 200
-        assert {j["key"] for j in r.json()} == {"sample_data", "doctor", "validate", "backtest"}
+        assert {j["key"] for j in r.json()} == {
+            "sample_data",
+            "doctor",
+            "validate",
+            "backtest",
+            "harvest",
+        }
