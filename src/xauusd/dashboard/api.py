@@ -181,18 +181,59 @@ app.add_middleware(
 # --------------------------------------------------------------------------------------
 
 
+def _engine_liveness() -> dict[str, Any]:
+    """Is the engine actually running, judged by its own output.
+
+    Deliberately measured from the decision journal rather than a heartbeat. The engine
+    journals a decision every M5 close whether or not it trades, so a recent decision is
+    proof it completed a full cycle — data, gates and all. A heartbeat only proves a
+    thread is alive, which an engine can be while doing nothing useful.
+    """
+    settings = get_settings()
+    interval = max(60, settings.decision_interval_seconds)
+    try:
+        with _database().session() as session:
+            rows = Repositories(session).decisions.recent(limit=1)
+            last = rows[0].ts if rows else None
+    except Exception as exc:
+        return {"connected": False, "detail": f"cannot read the journal: {type(exc).__name__}"}
+
+    if last is None:
+        return {"connected": False, "detail": "the engine has not journalled a decision yet"}
+
+    last = last if last.tzinfo else last.replace(tzinfo=UTC)
+    age = (datetime.now(UTC) - last).total_seconds()
+    # Two intervals of grace: one cycle can be skipped by a slow broker call without the
+    # engine being down, but two missed in a row means something is wrong.
+    return {
+        "connected": age <= interval * 2 + 60,
+        "last_decision_at": last.isoformat(),
+        "seconds_since_last_decision": round(age),
+        "detail": ""
+        if age <= interval * 2 + 60
+        else f"no decision journalled for {round(age / 60)} minutes",
+    }
+
+
 @app.get("/api/state")
 async def state() -> dict[str, Any]:
-    """The live engine state, as last published. Never queries the engine directly."""
+    """The live engine state. Never queries the engine directly.
+
+    `connected` reports whether the ENGINE is alive, not whether this web server
+    answered. They are separate processes, and conflating them meant a crashed engine
+    still showed a green light on the dashboard — the one indicator an operator glances
+    at to know the bot is running.
+    """
+    liveness = _engine_liveness()
+    s = get_settings()
     if not hub.latest:
-        s = get_settings()
         return {
-            "connected": False,
+            **liveness,
             "mode": str(s.mode),
             "live_trading": s.live_trading,
-            "message": "engine has not published state yet",
+            "message": liveness.get("detail") or "engine running; no state published yet",
         }
-    return hub.latest
+    return {**hub.latest, **liveness}
 
 
 @app.get("/api/health")
@@ -200,7 +241,7 @@ async def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "ts": datetime.now(UTC).isoformat(),
-        "engine_connected": bool(hub.latest),
+        "engine_connected": _engine_liveness()["connected"],
         "websocket_clients": len(hub.clients),
     }
 

@@ -548,9 +548,12 @@ async function refreshState() {
     state.data = await api('/api/state');
     renderCommandCentre();
     renderIntelligence();
-    setConnected(true);
+    // The payload says whether the ENGINE is alive. A successful fetch only proves the
+    // web server answered, and those are different processes — reporting the request's
+    // success as the engine's health left a crashed engine showing a green light.
+    setConnected(Boolean(state.data && state.data.connected), state.data && state.data.detail);
   } catch (e) {
-    setConnected(false);
+    setConnected(false, 'dashboard cannot reach its own API');
     panelError('#candidate', e);
   }
 }
@@ -582,10 +585,11 @@ async function refreshRejections() {
   }
 }
 
-function setConnected(ok) {
+function setConnected(ok, detail) {
   const dot = $('#conn-dot');
   dot.className = 'dot ' + (ok ? 'ok' : 'bad');
-  $('#conn-text').textContent = ok ? 'engine connected' : 'engine unreachable';
+  $('#conn-text').textContent = ok ? 'engine running' : (detail || 'engine not running');
+  $('#conn-text').title = detail || '';
 }
 
 function connectWs() {
@@ -599,7 +603,7 @@ function connectWs() {
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
-      if (msg.type === 'state') { state.data = msg.data; renderCommandCentre(); renderIntelligence(); setConnected(true); }
+      if (msg.type === 'state') { state.data = msg.data; renderCommandCentre(); renderIntelligence(); setConnected(Boolean(msg.data && msg.data.connected), msg.data && msg.data.detail); }
       if (msg.type === 'decision') refreshDecisions();
     } catch (e) { /* ignore malformed frames */ }
   };

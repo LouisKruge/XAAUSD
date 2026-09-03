@@ -806,3 +806,43 @@ added.
 feature meant to serve it. The docstring and the code disagreed, and only the docstring
 was right. Worth checking when a function explains what it is for: does it do that, or
 does it do something adjacent that happens to include it?
+
+---
+
+## 32. The green light meant the web server was alive
+
+The dashboard's status indicator read **"engine connected"**, in green, next to a green
+dot. It is the one thing an operator glances at to know the bot is running.
+
+It reported whether the browser's `fetch('/api/state')` had succeeded.
+
+`/api/state` answers `200 OK` unconditionally. When no engine state has been published it
+returns a body that says so — `{"connected": false, "message": "engine has not published
+state yet"}` — and the front end ignored the body entirely:
+
+```js
+state.data = await api('/api/state');
+setConnected(true);
+```
+
+So the light reported the health of the *dashboard's own web server*. Those are separate
+processes. A crashed engine, a stopped engine, an engine that never started — all showed
+green, indefinitely, because the thing being measured was still answering.
+
+Worse, `hub.latest` is only populated by `POST /api/publish`, and nothing in the engine
+ever calls it. The state the light was nominally about had never once been published in
+the entire life of the project. This is the third instance of the same shape, after
+findings 17 and 30: a producer and a consumer, each complete, never introduced.
+
+Liveness is now derived from the decision journal instead — deliberately, rather than by
+adding a heartbeat. The engine journals a decision on every M5 close whether or not it
+trades, so a recent decision proves a **full cycle completed**: data fetched, gates run,
+outcome recorded. A heartbeat proves only that a thread is alive, which an engine can be
+while doing nothing useful. Two intervals of grace absorbs one slow broker call; two
+missed in a row is a stopped engine.
+
+`/api/health` uses the same function, so the two can no longer disagree.
+
+**Class of bug:** a status indicator measuring its own transport. The question worth
+asking of any health display: if the thing it describes died right now, what would this
+show? If the answer is "the same as before", it is not a health indicator.

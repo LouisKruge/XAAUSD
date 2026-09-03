@@ -13,7 +13,7 @@ Two separate claims are tested here, and both were false before this suite exist
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -239,3 +239,60 @@ class TestCommandsReachTheBroker:
             row = Repositories(s).commands.recent(1)[0]
         assert row.status == "FAILED"
         assert "failed to close" in (row.result or "")
+
+
+class TestTheEngineLightTellsTheTruth:
+    """The green "engine connected" dot is the one thing an operator glances at to know
+    the bot is alive. It reported whether the WEB SERVER had answered — a different
+    process — so a crashed engine still showed green, indefinitely.
+
+    Liveness is judged from the decision journal rather than a heartbeat: the engine
+    journals a decision every M5 close whether or not it trades, so a recent one proves
+    a full cycle completed. A heartbeat only proves a thread is alive.
+    """
+
+    def test_no_journal_means_not_running(self, client) -> None:  # type: ignore[no-untyped-def]
+        r = client.get("/api/state", headers={"Authorization": f"Bearer {TOKEN}"})
+        assert r.status_code == 200, "the endpoint must answer, not error"
+        body = r.json()
+        assert body["connected"] is False
+        assert "not journalled" in body["detail"]
+
+    def test_a_recent_decision_means_running(self, client, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        from xauusd.dashboard import api
+
+        with api._database().session() as s:
+            s.execute(
+                _insert_decision(datetime.now(UTC)),
+            )
+            s.commit()
+        body = client.get("/api/state", headers={"Authorization": f"Bearer {TOKEN}"}).json()
+        assert body["connected"] is True
+
+    def test_a_stale_decision_means_not_running(self, client) -> None:  # type: ignore[no-untyped-def]
+        """Two missed cycles is not a slow broker call; it is a stopped engine."""
+        from xauusd.dashboard import api
+
+        with api._database().session() as s:
+            s.execute(_insert_decision(datetime.now(UTC) - timedelta(hours=3)))
+            s.commit()
+        body = client.get("/api/state", headers={"Authorization": f"Bearer {TOKEN}"}).json()
+        assert body["connected"] is False
+        assert "no decision journalled for" in body["detail"]
+
+    def test_health_agrees_with_state(self, client) -> None:  # type: ignore[no-untyped-def]
+        auth = {"Authorization": f"Bearer {TOKEN}"}
+        assert (
+            client.get("/api/health", headers=auth).json()["engine_connected"]
+            is client.get("/api/state", headers=auth).json()["connected"]
+        )
+
+
+def _insert_decision(ts):  # type: ignore[no-untyped-def]
+    from sqlalchemy import insert
+
+    from xauusd.database.models import DecisionRow
+
+    return insert(DecisionRow).values(
+        ts=ts, symbol="XAUUSD", classification="NO_TRADE", mode="DEMO", gate_trace=[]
+    )
