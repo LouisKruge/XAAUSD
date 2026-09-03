@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import socket
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -27,6 +28,7 @@ from xauusd.config.settings import Settings, load_settings, verify_live_arming
 from xauusd.database.repositories import Repositories
 from xauusd.database.session import Database
 from xauusd.domain.enums import Direction, Mode
+from xauusd.execution.symbol_discovery import resolve_symbol
 from xauusd.monitoring.alerts import Notifier
 from xauusd.monitoring.logging import configure_logging, get_logger
 
@@ -168,7 +170,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             if health.detail:
                 print(f"                   detail: {health.detail}")
 
-        spec = broker.symbol_spec(settings.symbol)
+        # Resolve the symbol exactly as the engine does, rather than trusting the
+        # configured name. Brokers call gold XAUUSD, XAUUSD.a, XAUUSDm, GOLD, GOLD.spot
+        # and more; a pre-flight that checks a name the engine would never use is
+        # checking the wrong instrument, and fails on brokers where the engine works.
+        symbol = settings.symbol
+        raw = getattr(broker, "raw_symbols", None)
+        if raw is not None:
+            try:
+                chosen = resolve_symbol(
+                    raw(settings.data.symbol_patterns, settings.data.symbol_override),
+                    settings.data.symbol_patterns,
+                    settings.data.symbol_override,
+                )
+                symbol = chosen.name
+                note = "" if symbol == settings.symbol else f"  (config says {settings.symbol})"
+                print(f"symbol resolved  : {symbol}{note} — {chosen.description}")
+            except Exception as exc:
+                print(f"symbol resolved  : FAILED — {exc}")
+                print(
+                    "                   the broker offers no tradable USD gold symbol "
+                    "matching the configured patterns. Check the exact name in MT5's "
+                    "Market Watch and set XAUUSD_DATA__SYMBOL_OVERRIDE in .env."
+                )
+                ok = False
+
+        spec = broker.symbol_spec(symbol)
         print(
             f"symbol spec      : contract={spec.contract_size} digits={spec.digits} "
             f"tick_size={spec.tick_size} tick_value_loss={spec.tick_value_loss}"
@@ -189,9 +216,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         # filled in wrongly, but this is the arithmetic the money follows.
         measured: float | None = None
         try:
-            quote = broker.quote(settings.symbol)
+            quote = broker.quote(symbol)
             measured = broker.calc_profit(
-                settings.symbol, Direction.LONG, 1.0, quote.ask, quote.ask + spec.tick_size
+                symbol, Direction.LONG, 1.0, quote.ask, quote.ask + spec.tick_size
             )
         except Exception as exc:
             print(f"                   (broker could not price a test tick: {exc})")
@@ -231,6 +258,43 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             ok = ok and armed
     except Exception as exc:
         print(f"broker           : FAILED — {exc}")
+        # "unreachable" has two very different causes with two different fixes, and the
+        # socket error alone does not distinguish them. Ask the port directly.
+        if settings.broker.kind.startswith("mt5"):
+            host, _, port_s = settings.broker.bridge_address.partition(":")
+            port = int(port_s or 50551)
+            listening = False
+            try:
+                with socket.create_connection((host, port), timeout=3):
+                    listening = True
+            except OSError:
+                listening = False
+
+            print(f"                   bridge address: {host}:{port}")
+            if listening:
+                print(
+                    "                   something IS listening there but did not answer — "
+                    "the bridge is running yet stuck, most often because the MT5 terminal "
+                    "was closed underneath it. Stop the bot, make sure MT5 is open and "
+                    "logged in, and start it again."
+                )
+            else:
+                print(
+                    "                   nothing is listening there — the bridge process is "
+                    "not running. Use Stop XAUUSD Bot, then Start XAUUSD Bot."
+                )
+            log = Path("logs/bridge.log")
+            if log.exists():
+                tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-3:]
+                if tail:
+                    print("                   last lines of logs/bridge.log:")
+                    for line in tail:
+                        print(f"                     {line[:150]}")
+            else:
+                print(
+                    "                   logs/bridge.log does not exist, so the bridge has "
+                    "never started in this installation."
+                )
         ok = False
 
     print()

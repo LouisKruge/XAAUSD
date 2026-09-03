@@ -895,3 +895,42 @@ are simply all ten times too big.
 
 **Class of bug:** trusting a single unverified input for a quantity where being wrong is
 unbounded. The check costs one broker call at startup. Not doing it costs the account.
+
+---
+
+## 34. The pre-flight checked a symbol the engine would never use
+
+A broker whose Market Watch shows `GOLD, H1: SPOT Gold Ounce vs US Dollar` produced:
+
+    broker : OK (kind=mt5_grpc) login=592040268 equity=1000.00 USD
+    broker : FAILED — RuntimeError: symbol_select failed for XAUUSD
+
+The bridge was connected and the account was live. The failure was that `doctor` called
+`broker.symbol_spec(settings.symbol)` — the literal `XAUUSD` from the config file.
+
+The engine does not do that. `TradingEngine._resolve_symbol` asks the broker for its
+symbol list and runs `resolve_symbol`, which matches `^XAU` or `^GOLD`, filters to
+tradable USD instruments, and picks by spread and quality. It would have found `GOLD`
+immediately.
+
+So the pre-flight — whose entire purpose is *verify before running* — exercised a
+different code path from the thing it verifies. On this broker it failed where the engine
+would have worked. The reverse case is worse and was equally possible: a broker offering
+both `XAUUSD` (untradable, wide-spread, or a CFD on a different underlying) and
+`XAUUSD.pro` would have had the pre-flight bless the configured name while the engine
+traded the other one, with every check — spec coherence, tick value, quote sanity —
+performed against an instrument nobody was going to trade.
+
+`doctor` now resolves the symbol the same way and prints the result, including when it
+differs from the configured name:
+
+    symbol resolved  : GOLD  (config says XAUUSD) — SPOT Gold Ounce vs US Dollar
+
+and every subsequent check — spec, tick value, `calc_profit` — uses the resolved name.
+A resolution failure now says which patterns were tried and points at
+`XAUUSD_DATA__SYMBOL_OVERRIDE`.
+
+**Class of bug:** a verification step that does not use the code path it verifies. It is
+the same family as testing at the seam (finding 30): both sides work, the check passes,
+and nobody exercised the join. A pre-flight is only worth its output if it fails exactly
+when the real thing would.
