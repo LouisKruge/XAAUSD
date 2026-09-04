@@ -155,7 +155,7 @@ class TestTargetPlacement:
             obstacles=[101.5],
         )
         assert target == 101.5
-        assert "nearest opposing level" in why
+        assert "opposing level at" in why
 
     def test_no_obstacle_gives_the_requested_rr(self) -> None:
         target, why = structural_target(100.0, 98.0, Direction.LONG, 1.5, [])
@@ -169,6 +169,30 @@ class TestTargetPlacement:
     def test_a_short_target_looks_downward(self) -> None:
         target, _ = structural_target(100.0, 102.0, Direction.SHORT, 1.5, [98.5])
         assert target == 98.5
+
+    def test_an_obstacle_inside_the_noise_floor_is_traded_through(self) -> None:
+        """The liquidity engine finds 150+ pools on a few hundred M5 bars, so there is
+        almost always one within a cent of price. Respecting it produced targets of
+        0.01R — not a conservative target, no target at all."""
+        target, why = structural_target(
+            entry=100.0,
+            stop=98.0,
+            direction=Direction.LONG,
+            target_rr=1.5,
+            obstacles=[100.02],
+            min_rr=0.75,
+        )
+        assert target == pytest.approx(103.0), "a level 0.01R away is noise, not a barrier"
+        assert "beyond the 0.75R floor" in why
+
+    def test_an_obstacle_just_past_the_floor_is_respected(self) -> None:
+        target, _ = structural_target(100.0, 98.0, Direction.LONG, 1.5, [101.6], min_rr=0.75)
+        assert target == 101.6
+
+    def test_a_zero_risk_plan_cannot_produce_a_target(self) -> None:
+        target, why = structural_target(100.0, 100.0, Direction.LONG, 1.5, [])
+        assert target == 100.0
+        assert "no risk distance" in why
 
 
 class TestTheScorer:

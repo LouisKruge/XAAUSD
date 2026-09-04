@@ -180,23 +180,33 @@ def structural_target(
     direction: Direction,
     target_rr: float,
     obstacles: list[float],
+    min_rr: float = 0.75,
 ) -> tuple[float, str]:
-    """Target at the requested RR, pulled in to the nearest obstacle in the way.
+    """Target at the requested RR, pulled in to the nearest obstacle worth respecting.
 
     Reaching *through* resting liquidity to hit a round number is how a 1:1.5 target
-    becomes a 1:0.8 fill. So the nearest opposing level short of the RR target wins,
-    and the caller decides whether what remains still clears its costs.
+    becomes a 1:0.8 fill, so an opposing level short of the RR target wins.
+
+    But not every level is a barrier. The liquidity engine finds well over a hundred
+    pools on a few hundred M5 bars, so there is almost always one within a cent of
+    price — and pulling the target to it produced targets of 0.01R, which is not a
+    conservative target, it is no target at all. Anything closer than `min_rr` is
+    inside the noise the trade is trying to cross, so it is traded through rather than
+    respected. Only obstacles that still leave a worthwhile target can move it.
     """
     risk = abs(entry - stop)
+    if risk <= 0:
+        return entry, "no risk distance"
     ideal = entry + risk * target_rr if direction is Direction.LONG else entry - risk * target_rr
+    floor = entry + risk * min_rr if direction is Direction.LONG else entry - risk * min_rr
 
     ahead = [
         o
         for o in obstacles
-        if (direction is Direction.LONG and entry < o <= ideal)
-        or (direction is Direction.SHORT and ideal <= o < entry)
+        if (direction is Direction.LONG and floor <= o <= ideal)
+        or (direction is Direction.SHORT and ideal <= o <= floor)
     ]
     if not ahead:
-        return ideal, f"{target_rr:.2f}R, no obstacle in the way"
+        return ideal, f"{target_rr:.2f}R, no obstacle beyond the {min_rr:.2f}R floor"
     nearest = min(ahead) if direction is Direction.LONG else max(ahead)
-    return nearest, f"nearest opposing level at {nearest:.2f}, short of the {target_rr:.2f}R target"
+    return nearest, f"opposing level at {nearest:.2f}, short of the {target_rr:.2f}R target"

@@ -83,6 +83,7 @@ class RiskGate:
         class_cap = {
             Classification.A_PLUS: r.risk_pct_a_plus,
             Classification.A: r.risk_pct_a,
+            Classification.SCALP: self.settings.scalp.risk_pct,
             Classification.NO_TRADE: 0.0,
         }[classification]
 
@@ -184,12 +185,28 @@ class RiskGate:
             )
         )
 
+        # The 1:2 floor is the A/A+ engine's, and it is unchanged for A/A+. It is the
+        # WRONG question for a trade held minutes: it measures reward against risk and
+        # ignores what the trade costs to open and close. The scalp tier answers that
+        # question with the cost and net-expectancy gates instead, which are stricter
+        # for a setup whose costs eat it, and it carries its own gross-RR floor so a
+        # high win rate cannot be bought by shrinking the target to nothing.
+        min_rr = (
+            self.settings.scalp.min_gross_rr
+            if classification is Classification.SCALP
+            else self.settings.thresholds.min_rr
+        )
         checks.append(
             GateResult(
                 "risk.min_rr",
-                plan.rr >= self.settings.thresholds.min_rr,
+                plan.rr >= min_rr,
                 round(plan.rr, 3),
-                self.settings.thresholds.min_rr,
+                min_rr,
+                detail=(
+                    "scalp floor; net expectancy is the binding economic test"
+                    if classification is Classification.SCALP
+                    else ""
+                ),
             )
         )
 

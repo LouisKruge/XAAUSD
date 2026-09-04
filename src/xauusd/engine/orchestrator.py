@@ -28,19 +28,23 @@ from typing import Any
 
 from xauusd.config.settings import Settings, verify_live_arming
 from xauusd.core.analyzer import snapshot_payload
+from xauusd.core.micro_structure import MicroAnalyzer
 from xauusd.core.sessions import BrokerClock, SessionEngine
 from xauusd.data.marketview import MarketView
 from xauusd.data.series import BarSeries
 from xauusd.database.repositories import Repositories
 from xauusd.database.session import Database
 from xauusd.domain.enums import (
+    Classification,
     KillSwitchReason,
     Mode,
     Timeframe,
     ValidationStatus,
 )
-from xauusd.domain.types import MacroState, NewsState, SymbolSpec
+from xauusd.domain.types import Decision, MacroState, NewsState, SymbolSpec
+from xauusd.engine.continuous import ContinuousScanner, ScanOutcome
 from xauusd.engine.pipeline import DecisionPipeline, EngineState, client_tag
+from xauusd.engine.scalp_pipeline import ScalpPipeline
 from xauusd.execution.broker import Broker, BrokerError
 from xauusd.execution.order_manager import OrderManager
 from xauusd.execution.position_manager import PositionManager
@@ -49,6 +53,7 @@ from xauusd.execution.symbol_discovery import resolve_symbol, sanity_check_quote
 from xauusd.monitoring.alerts import Notifier
 from xauusd.monitoring.health import HealthRegistry
 from xauusd.monitoring.logging import cycle_context, get_logger
+from xauusd.risk.correlation import OpenExposure
 from xauusd.risk.drawdown import DrawdownGuard
 from xauusd.risk.gate import RiskGate
 from xauusd.risk.kill_switch import KillSwitch
@@ -145,6 +150,23 @@ class TradingEngine:
         self.drawdown = DrawdownGuard(settings.risk)
         self.risk_gate = RiskGate(settings, self.drawdown, self.kill_switch)
         self.pipeline = DecisionPipeline(settings, risk_gate=self.risk_gate, git_sha=git_sha)
+
+        # The short-duration engine. It shares this risk gate deliberately: a scalp and
+        # an A+ draw from the same drawdown budget, the same kill switch and the same
+        # open-risk cap, so they must consult one instance rather than two that agree
+        # by coincidence.
+        self.micro = MicroAnalyzer(settings)
+        self.scalp = ScalpPipeline(settings, risk_gate=self.risk_gate)
+        self.scalp_scanner = ContinuousScanner(
+            self._scalp_scan,
+            interval_seconds=settings.scalp.scan_interval_seconds,
+            name="scalp",
+            should_run=lambda: (
+                self.running
+                and settings.scalp.enabled
+                and self.sessions.is_market_open(datetime.now(UTC))
+            ),
+        )
         self.orders = OrderManager(
             broker, settings, self.kill_switch, self.notifier, persist=self._persist_order
         )
@@ -297,6 +319,9 @@ class TradingEngine:
         await asyncio.gather(
             self._tick_loop(),
             self._decision_loop(),
+            # A separate task, not a step inside the M5 cycle: a slow scalp scan must
+            # never delay the A/A+ decision, and vice versa.
+            self.scalp_scanner.run(),
             self._reconcile_loop(),
             self._context_loop(),
             self._command_loop(),
@@ -423,6 +448,120 @@ class TradingEngine:
             self._execute(result.executable, spec, now)
 
         self.health.report("engine", True, int((time.perf_counter() - t0) * 1000))
+
+    def _scalp_scan(self) -> ScanOutcome:
+        """One continuous-scan pass. Runs off the M5 cycle, on its own cadence.
+
+        Everything is re-read here rather than carried from the last M5 cycle: a scan
+        two seconds old is a different market, and the whole point of scanning
+        continuously is to act on what is true now.
+        """
+        t0 = time.perf_counter()
+        now = datetime.now(UTC)
+
+        day = self.clock.to_broker(now).date()
+        if self._day != day:
+            self._day, self.trades_today = day, 0
+
+        try:
+            account = self.broker.account()
+            quote = self.broker.quote(self.symbol)
+            spec = self.broker.symbol_spec(self.symbol)
+            positions = self.broker.positions(magic=self.settings.broker.magic)
+        except BrokerError as exc:
+            return ScanOutcome(
+                ts=now,
+                duration_ms=int((time.perf_counter() - t0) * 1000),
+                error=f"broker: {exc}",
+            )
+
+        source = _BrokerBarSource(self.broker, self.settings)
+        view = MarketView(source, self.symbol, now, quote)
+        micro = self.micro.analyze(view)
+        snap = self.pipeline.analyzer.analyze(
+            view,
+            self.context.macro,
+            self.context.news,
+            quote.spread_points(spec.point),
+            25.0,
+        )
+
+        cycle = self.scalp.run(
+            micro,
+            snap,
+            account=account,
+            spec=spec,
+            now=now,
+            open_positions=positions,
+            open_risk_pct=self._open_risk(positions, account.equity, spec),
+            trades_today=self.trades_today,
+            exposures=self._scalp_exposures(positions, account.equity, spec),
+            broker_calc_profit=None,
+        )
+
+        self._persist_scalp(cycle)
+        if cycle.executable is not None and cycle.executable.plan is not None:
+            self._execute_scalp(cycle.executable, spec, now)
+
+        return cycle.as_outcome(int((time.perf_counter() - t0) * 1000))
+
+    def _scalp_exposures(self, positions, equity: float, spec) -> list[OpenExposure]:  # type: ignore[no-untyped-def]
+        """Open positions as the correlation budgets see them."""
+        out: list[OpenExposure] = []
+        for p in positions:
+            tracked = (
+                self.positions.tracked(p.ticket) if hasattr(self.positions, "tracked") else None
+            )
+            plan = getattr(tracked, "plan", None)
+            risk = self.settings.scalp.risk_pct
+            out.append(
+                OpenExposure(
+                    direction=p.direction,
+                    risk_pct=risk,
+                    stop_price=p.stop_loss or p.price_open,
+                    opened_at=p.opened_at,
+                    model=getattr(plan, "strategy", "") or "",
+                    liquidity_ref=None,
+                )
+            )
+        return out
+
+    def _scalp_decision(self, ev, now: datetime) -> Decision:  # type: ignore[no-untyped-def]
+        """One evaluation as a journal entry, traded or not.
+
+        Rejected scalps are journalled too. A scan that finds nothing and a scan whose
+        every candidate was refused look identical from outside, and telling them apart
+        is the whole reason the rejection ledger exists.
+        """
+        return Decision(
+            ts=now,
+            symbol=self.symbol,
+            classification=(Classification.SCALP if ev.approved else Classification.NO_TRADE),
+            mode=str(self.settings.mode),
+            plan=ev.plan,
+            score=ev.score,
+            gates=tuple(ev.checks),
+            reasons_against=() if ev.approved else (ev.rejected_by or "unknown",),
+            config_hash=self.settings.config_hash(),
+            git_sha=self.pipeline.git_sha,
+        )
+
+    def _persist_scalp(self, cycle) -> None:  # type: ignore[no-untyped-def]
+        """Journal every evaluation. Never let a write failure stop the scan."""
+        if not cycle.evaluations:
+            return
+        try:
+            with self.db.session() as s:
+                repos = Repositories(s)
+                for ev in cycle.evaluations:
+                    repos.decisions.save(self._scalp_decision(ev, cycle.ts))
+                s.commit()
+        except Exception as exc:
+            log.error("scalp_persist_failed", error=f"{type(exc).__name__}: {exc}")
+
+    def _execute_scalp(self, ev, spec, now: datetime) -> None:  # type: ignore[no-untyped-def]
+        """Route an approved scalp through the SAME execution path as an A/A+ trade."""
+        self._execute(self._scalp_decision(ev, now), spec, now)
 
     def _execute(self, decision, spec, now: datetime) -> None:  # type: ignore[no-untyped-def]
         tag = client_tag(decision.plan)

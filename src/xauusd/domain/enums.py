@@ -96,6 +96,10 @@ class Classification(StrEnum):
     NO_TRADE = "NO_TRADE"
     A = "A"
     A_PLUS = "A_PLUS"
+    # The short-duration tier. Separate from A/A+ rather than a lower grade of it:
+    # it has its own score, its own gates and its own risk fraction, and mixing it
+    # into the A ladder would let a scalp inherit an A's 1% by accident.
+    SCALP = "SCALP"
 
 
 class StructureKind(StrEnum):

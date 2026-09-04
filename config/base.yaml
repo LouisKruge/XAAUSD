@@ -14,6 +14,37 @@ enabled_strategies:
   - sweep_mss_fvg
   - sweep_mss_ob
 
+# The short-duration engine, running beside the A/A+ one on its own cadence.
+#
+# Enabled here so the bot scans and trades on start. What keeps that safe is NOT this
+# switch: live money still needs mode=LIVE, live_trading=true and a machine-specific
+# arming file matching the account, and g_strategy_validated refuses live routing for
+# any strategy that has not passed out-of-sample validation. In PAPER and DEMO the
+# scalp engine trades freely, which is the point - that is how it earns a record.
+#
+# Every threshold below is a STARTING POINT awaiting the out-of-sample sweep, not a
+# validated value. min_score in particular is a guess.
+scalp:
+  enabled: true
+  scan_interval_seconds: 2.0
+  enabled_models:
+    - scalp_sweep_reversal
+    - scalp_fvg_retracement
+    - scalp_ob_reaction
+    - scalp_breakout_retest
+    - scalp_momentum_continuation
+  risk_pct: 0.0015            # 10 concurrent would be 1.50%, inside the 2% cap
+  max_concurrent: 1           # raised only when the correlation gate is wired live
+  max_cost_fraction: 0.35     # costs may not exceed 35% of 1R
+  min_net_expectancy_r: 0.05  # positive by a margin, not by a rounding error
+  assumed_win_probability: 0.55
+  target_rr: 1.5
+  min_gross_rr: 1.25          # below this a high win rate stops being worth having
+  min_score: 65.0             # (validated) placeholder - sweep this first
+  max_hold_minutes: 90
+  min_stop_atr: 0.8
+  max_stop_atr: 3.5
+
 risk:
   risk_pct_a: 0.01
   risk_pct_a_plus: 0.02
