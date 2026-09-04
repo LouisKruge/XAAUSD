@@ -499,19 +499,51 @@ def _load_data(args: argparse.Namespace, settings: Settings) -> dict:
         )
         return market(args.synthetic, seed=args.seed)
 
+    from xauusd.data.harvest import resolve_stored_symbol
+
     db = Database(settings.database.url)
+
+    # Read under the symbol history was actually STORED under. The harvester writes
+    # using the name the broker resolved to — this broker calls spot gold GOLD — and
+    # defaulting to the configured name here made a successful harvest look like an
+    # empty database.
+    symbol, note = resolve_stored_symbol(db, settings.symbol, Timeframe.M5, args.source)
+    if note:
+        print(f"symbol           : {note}")
+
+    # Prefer M1 when it is held: the scalp engine triggers on M1, and building M5 from
+    # the M1 that actually traded keeps the timeframes consistent rather than pairing
+    # real M5 with absent M1.
     with db.session() as s:
         repos = Repositories(s)
-        bars = repos.bars.load(settings.symbol, Timeframe.M5, source=args.source)
-    if len(bars) < 5000:
+        m1_bars = repos.bars.load(symbol, Timeframe.M1, source=args.source)
+        m5_bars = repos.bars.load(symbol, Timeframe.M5, source=args.source)
+
+    if len(m1_bars) >= 20_000:
+        print(f"base timeframe   : M1 ({len(m1_bars)} bars) — M5 and above derived from it")
+        m1 = BarSeries.from_bars(Timeframe.M1, m1_bars)
+        built = build_timeframes(
+            m1,
+            [Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1, Timeframe.W1],
+        )
+        built[Timeframe.M1] = m1
+        return built
+
+    if len(m5_bars) < 5000:
         raise SystemExit(
-            f"only {len(bars)} M5 bars in the database for {settings.symbol}.\n"
+            f"only {len(m5_bars)} M5 and {len(m1_bars)} M1 bars in the database for "
+            f"{symbol!r}.\n"
             f"Download history first: dashboard System tab -> 'Download price "
             f"history', or `xauusd harvest`. The MT5 bridge must be running.\n"
             f"`--synthetic N` runs a smoke test instead, but generated data has no "
             f"genuine market structure, so it correctly produces no trades."
         )
-    m5 = BarSeries.from_bars(Timeframe.M5, bars)
+    if m1_bars:
+        print(
+            f"base timeframe   : M5 ({len(m5_bars)} bars). Only {len(m1_bars)} M1 bars "
+            f"are held, so the scalp engine cannot be backtested — harvest more M1."
+        )
+    m5 = BarSeries.from_bars(Timeframe.M5, m5_bars)
     return build_timeframes(
         m5, [Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1, Timeframe.W1]
     )

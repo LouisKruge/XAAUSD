@@ -49,7 +49,7 @@ from xauusd.domain.types import (
 )
 
 HTF = (Timeframe.MN1, Timeframe.W1, Timeframe.D1, Timeframe.H4)
-LTF = (Timeframe.H1, Timeframe.M15, Timeframe.M5)
+LTF = (Timeframe.H1, Timeframe.M15, Timeframe.M5, Timeframe.M1)
 
 # Pruning. Analysis of the whole history produces hundreds of pools and dozens of
 # stale sweeps, which is noise, not information: a sweep 400 bars ago is history, and a

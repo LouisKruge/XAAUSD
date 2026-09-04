@@ -5,7 +5,13 @@
 env: dev
 mode: PAPER
 live_trading: false
-symbol: XAUUSD
+# The broker's own name for spot gold. This terminal shows "GOLD, M1: SPOT Gold
+# Ounce vs US Dollar", so GOLD it is. Symbol DISCOVERY still runs at startup and is
+# the runtime authority — it matches ^XAU or ^GOLD, keeps tradable USD instruments
+# and checks the quote is in the bullion band, so a broker that calls it XAUUSD still
+# works. This value is what the OFFLINE paths use, where there is no broker to ask:
+# the backtest, the validation run and anything reading harvested history.
+symbol: GOLD
 log_level: INFO
 log_json: true
 decision_interval_seconds: 300
@@ -173,6 +179,16 @@ news:
 data:
   synthetic_dxy: true
   lake_path: data/lake
+  # M1 is the scalp engine's trigger timeframe. 3000 bars is ~2 days of M1, enough
+  # for micro structure with the ATR warm-up cleared.
+  bars_to_load:
+    M1: 3000
+    M5: 1500
+    M15: 1000
+    H1: 800
+    H4: 500
+    D1: 400
+    W1: 200
 
 broker:
   kind: sim

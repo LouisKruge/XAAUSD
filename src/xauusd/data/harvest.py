@@ -174,3 +174,50 @@ def coverage(
     if not bars:
         return 0, None, None
     return len(bars), bars[0].ts, bars[-1].ts
+
+
+def stored_symbols(db: Database, timeframe: Timeframe, source: str = "mt5") -> dict[str, int]:
+    """Which symbols actually have bars, and how many. Ordered most-held first."""
+    from sqlalchemy import func, select
+
+    from xauusd.database.models import BarRow
+
+    with db.session() as session:
+        rows = session.execute(
+            select(BarRow.symbol, func.count())
+            .where(BarRow.timeframe == str(timeframe), BarRow.source == source)
+            .group_by(BarRow.symbol)
+        ).all()
+    return dict(sorted(((str(s), int(n)) for s, n in rows), key=lambda kv: -kv[1]))
+
+
+def resolve_stored_symbol(
+    db: Database, configured: str, timeframe: Timeframe, source: str = "mt5"
+) -> tuple[str, str]:
+    """The symbol to READ history under, given what was actually stored.
+
+    `harvest` writes under the symbol the broker resolved to — this broker calls spot
+    gold `GOLD` — while offline consumers default to the configured name. When those
+    differ, a successful harvest is followed by "0 bars in the database" against a full
+    table, and the operator has no way to see why. That is the same divergence that
+    broke `doctor` twice, in a third place.
+
+    Returns (symbol, note). The note is empty when the configured name was used, and
+    explains the substitution otherwise, so the choice is never silent.
+    """
+    held = stored_symbols(db, timeframe, source)
+    if held.get(configured):
+        return configured, ""
+    if not held:
+        return configured, ""
+    if len(held) == 1:
+        only = next(iter(held))
+        return only, (
+            f"no {timeframe} history under {configured!r}; using {only!r} "
+            f"({held[only]} bars), which is what the broker resolved to when harvesting"
+        )
+    names = ", ".join(f"{k} ({v})" for k, v in held.items())
+    raise SystemExit(
+        f"history is held under several symbols and none is {configured!r}: {names}.\n"
+        f"Set XAUUSD_SYMBOL or XAUUSD_DATA__SYMBOL_OVERRIDE to the one you mean."
+    )
