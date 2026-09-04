@@ -71,8 +71,7 @@ class ViabilityReport:
             return out
 
         out += [
-            "VERDICT          : ACCOUNT NOT EXECUTIONALLY VIABLE UNDER CURRENT "
-            "BROKER CONDITIONS",
+            "VERDICT          : ACCOUNT NOT EXECUTIONALLY VIABLE UNDER CURRENT BROKER CONDITIONS",
             f"                   one minimum lot ({self.forced_risk_pct:.1%}) exceeds the "
             f"{self.risk_pct_target:.2%} budget by {self.forced_risk_pct / self.risk_pct_target:.0f}x",
             f"                   minimum viable equity at this stop and risk: "

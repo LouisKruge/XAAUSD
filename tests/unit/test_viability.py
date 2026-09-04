@@ -89,8 +89,12 @@ class TestAViableAccountPasses:
 class TestMargin:
     def test_margin_is_reported_when_leverage_is_known(self) -> None:
         r = assess_account(
-            gold(), equity=16.48, risk_pct=0.0015, stop_distance=2.00,
-            price=2600.0, leverage=500,
+            gold(),
+            equity=16.48,
+            risk_pct=0.0015,
+            stop_distance=2.00,
+            price=2600.0,
+            leverage=500,
         )
         assert r.margin_per_min_lot == pytest.approx(5.20)
         # One position consumes a third of the account before any loss.
