@@ -1250,3 +1250,93 @@ than absent, including the case that matters most: a model whose signal is other
 flawless — clearing the score, the RR floor and both economic gates — is still refused.
 A test whose signal could fail for another reason would pass whether or not the check
 exists.
+
+---
+
+## 41. The "structural target" was arithmetic on spent liquidity
+
+The complaint was still frequency: a week of real M1, zero trades. FINDINGS 39 widened
+the higher-timeframe read; that was worth doing and it was not the answer. This is.
+
+Opening the score gate completely — `min_score: 0`, so every candidate reaches the gates
+behind it — moved the refusal one stage down rather than producing trades:
+
+```
+212 candidates
+  174  scalp_min_gross_rr      <- 82%
+   29  scalp_cost_ratio
+    1  scalp_net_expectancy
+    8  approved
+```
+
+Median gross reward-to-risk across every signal five models produced: **0.81**, against
+a floor of 1.25 and a configured target of 1.50. The models were not producing bad
+setups. Something was systematically destroying their targets.
+
+### What `_obstacles` was actually doing
+
+```python
+return [p.price for p in micro.pools] + [lvl.price for lvl in snap.sr_levels]
+```
+
+Measured, on the same snapshots the engine builds:
+
+```
+snapshots 27: 123.4 pools each, 9.9% resting
+```
+
+**123 liquidity pools per instant, and 90% of them already swept.** `structural_target`
+pulls the target to the nearest obstacle between the 0.75R noise floor and the 1.5R
+ideal. For a typical scalp stop that window spans about one ATR, and with pools at that
+density roughly eleven of them fall inside it on every single signal. The target was
+therefore approximately the *minimum of eleven near-arbitrary draws*, which lands just
+above the floor — exactly the 0.81 median observed.
+
+That is not a structural target. It is a noise floor wearing the name of one.
+
+Isolating it, same 212 signals, same bars, only the obstacle definition changed:
+
+| obstacle set | clear 1.25 | rr p50 |
+|---|---|---|
+| all pools + S/R + HTF (as shipped) | 38/212 (17.9%) | 0.81 |
+| swept pools dropped (resting only) | 143/212 (67.5%) | 1.50 |
+| resting pools with >= 3 touches | 158/212 (74.5%) | 1.50 |
+| S/R and HTF only | 162/212 (76.4%) | 1.50 |
+
+### Why this is a correctness fix and not a threshold relaxation
+
+A pool with `swept_ts` set is spent liquidity: the stops behind it have already been
+taken. It is not a barrier to a future move, and **the rest of this system has always
+known that**:
+
+| where | what it does |
+|---|---|
+| `strategy/base.py:80` | filters `p.is_resting` when building targets |
+| `strategy/features.py:201` | `resting_liquidity(...)` ahead of entry is the *draw* |
+| `strategy/features.py:212` | `resting_liquidity(...)` behind entry is the opposition |
+| `MarketSnapshot.resting_liquidity` | exists for precisely this distinction |
+| `strategy/scalp/models.py` | **every pool, swept or not, is a wall** |
+
+The A/A+ path goes further still: resting liquidity *ahead in the trade's direction* is
+where price is being drawn, so it is a target candidate. The scalp path inverted that
+into a barrier. Tenth instance of the class — one rule, several enforcement points, and
+the newest path never learned it.
+
+`_obstacles` now filters `p.is_resting`, and `tests/unit/test_scalp_obstacles.py` pins
+it, including the case that caused the damage: eleven swept pools inside the target
+window no longer move the target at all, while one *resting* pool in that window still
+does. The rule is "spent liquidity is not a barrier", not "ignore liquidity".
+
+### What is still unanswered
+
+Two of the three alternatives above cluster at p50 = p90 = 1.50, which says something
+uncomfortable: with pools excluded, S/R and HTF levels almost never bind either. So
+`structural_target` is currently noise-driven or close to inert, and the middle ground —
+whether resting pools ahead should be draws rather than walls, as the A/A+ path treats
+them — is a real question this fix does not settle. It is the next thing the sweep should
+answer on real history.
+
+**And none of this is evidence of an edge.** It removes a mechanical defect that was
+refusing four signals in five for a bad reason. Whether what remains has positive
+expectancy after costs is untested, and a fix that raises trade supply is exactly the
+kind that must be validated out-of-sample before it is trusted.

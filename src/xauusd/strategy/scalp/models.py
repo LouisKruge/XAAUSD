@@ -42,13 +42,29 @@ def _obstacles(
 ) -> list[float]:
     """Everything that could stop price before the target.
 
-    M1/M5 pools and S/R come first because they are nearest, but a scalp that aims
-    through an H4 level is not a 1.5R trade — it is a trade that stalls at the level and
-    exits on the time stop. The higher-timeframe obstacles are what make the difference,
-    and they can only ever pull a target *in*, never push it out.
+    M1/M5 levels come first because they are nearest, but a scalp that aims through an
+    H4 level is not a 1.5R trade — it is a trade that stalls at the level and exits on
+    the time stop. Obstacles can only ever pull a target *in*, never push it out.
+
+    **Swept pools are excluded, and that is a correctness rule rather than a
+    preference.** A pool with `swept_ts` set is spent liquidity: the stops behind it
+    have already been taken, so it is not a barrier to a future move. The rest of this
+    system has always known that — `strategy/base.py` filters `p.is_resting` when it
+    builds targets, `features.py` reads `snap.resting_liquidity(...)` for both the draw
+    and the opposition, and `MarketSnapshot.resting_liquidity` exists for exactly this
+    purpose. This function ignored the distinction and treated all of them as walls.
+
+    It mattered enormously. `MicroSnapshot` carries ~123 pools per instant and 90% of
+    them are already swept, so with a target window spanning roughly one ATR there were
+    always about eleven "obstacles" inside it. The target became the minimum of eleven
+    near-arbitrary draws and landed just above the 0.75R noise floor: median gross
+    reward-to-risk 0.81 against a 1.25 floor, so 82% of every signal the models produced
+    was refused by arithmetic on spent liquidity. See FINDINGS 41.
     """
     return (
-        [p.price for p in micro.pools] + [lvl.price for lvl in snap.sr_levels] + list(htf_obstacles)
+        [p.price for p in micro.pools if p.is_resting]
+        + [lvl.price for lvl in snap.sr_levels]
+        + list(htf_obstacles)
     )
 
 
