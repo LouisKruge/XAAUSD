@@ -282,6 +282,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"{spec.currency_profit}"
                 + (f" (broker prices it at {measured:.2f})" if measured is not None else "")
             )
+        # --- can this account trade this instrument at all? --------------------------
+        # The sizer already refuses, per trade, to round a sub-minimum position up. But
+        # that answer arrives silently: on an account too small for the instrument every
+        # setup is refused for one structural reason, and what the operator sees is a bot
+        # that never trades — indistinguishable from a strategy being selective. Say it
+        # once, here, before any money is committed.
+        if not mismatch:
+            from xauusd.risk.viability import assess_account
+
+            # A structurally honest stop, not the smallest stop that would fit. Scaled to
+            # the instrument's own volatility so the check travels to other brokers.
+            stop = max(2.0, 200 * spec.point)
+            report = assess_account(
+                spec,
+                equity=account.equity,
+                risk_pct=settings.risk.risk_pct_a,
+                stop_distance=stop,
+                currency=account.currency,
+            )
+            print("account viability:")
+            for line in report.lines():
+                if line:
+                    print(f"  {line}")
+            if not report.viable:
+                ok = False
+
         if settings.mode is Mode.LIVE:
             armed, why = verify_live_arming(settings, account.login)
             print(f"live arming      : {'ARMED' if armed else 'NOT ARMED'} — {why}")
