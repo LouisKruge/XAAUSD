@@ -26,6 +26,7 @@ from xauusd.strategy.scalp.base import (
     clamp01,
     structural_target,
 )
+from xauusd.strategy.scalp.htf import read_htf
 
 TREND_REGIMES = frozenset(
     {Regime.STRONG_BULL, Regime.MODERATE_BULL, Regime.MODERATE_BEAR, Regime.STRONG_BEAR}
@@ -36,9 +37,19 @@ ALL_TRADABLE = TREND_REGIMES | {Regime.RANGE}
 SHIFT_WINDOW_S = 20 * 60
 
 
-def _obstacles(snap: MarketSnapshot, micro: MicroSnapshot) -> list[float]:
-    """Everything that could stop price before the target: pools and S/R."""
-    return [p.price for p in micro.pools] + [lvl.price for lvl in snap.sr_levels]
+def _obstacles(
+    snap: MarketSnapshot, micro: MicroSnapshot, htf_obstacles: tuple[float, ...] = ()
+) -> list[float]:
+    """Everything that could stop price before the target.
+
+    M1/M5 pools and S/R come first because they are nearest, but a scalp that aims
+    through an H4 level is not a 1.5R trade — it is a trade that stalls at the level and
+    exits on the time stop. The higher-timeframe obstacles are what make the difference,
+    and they can only ever pull a target *in*, never push it out.
+    """
+    return (
+        [p.price for p in micro.pools] + [lvl.price for lvl in snap.sr_levels] + list(htf_obstacles)
+    )
 
 
 def _session_factor(snap: MarketSnapshot) -> float:
@@ -73,20 +84,6 @@ def _volatility_factor(micro: MicroSnapshot, cfg_min: float, cfg_max: float) -> 
     if ratio < 0.2 or ratio > 0.9:
         return 0.2
     return clamp01(1.0 - abs(ratio - 0.45) / 0.45)
-
-
-def _htf_factor(snap: MarketSnapshot, direction: Direction) -> float:
-    """Higher-timeframe agreement. Soft for scalps, hard only at weekly and above."""
-    from xauusd.domain.enums import Timeframe
-
-    score, weight = 0.0, 0.0
-    for tf, w in ((Timeframe.H1, 0.25), (Timeframe.H4, 0.35), (Timeframe.D1, 0.40)):
-        bias = snap.bias(tf)
-        weight += w
-        if bias.conflicts_with(direction):
-            continue
-        score += w if bias.sign != 0 else w * 0.5
-    return clamp01(score / weight) if weight else 0.0
 
 
 def _news_factor(snap: MarketSnapshot) -> float:
@@ -154,8 +151,17 @@ class _Base:
         ):
             return None
 
+        # The H4/H1/M15 read, taken once and used three ways: it scores the signal, it
+        # bounds the target, and it goes in the journal so a later reader can see which
+        # timeframes agreed and which did not.
+        htf = read_htf(snap, direction, entry, micro.atr_m5)
+
         target, rationale = structural_target(
-            entry, stop, direction, self.cfg.target_rr, _obstacles(snap, micro)
+            entry,
+            stop,
+            direction,
+            self.cfg.target_rr,
+            _obstacles(snap, micro, htf.obstacles),
         )
         # Record the ATR the stop was scaled against. Every structural threshold in the
         # system is ATR-scaled, so a journal entry without it cannot be re-derived later.
@@ -165,12 +171,13 @@ class _Base:
             "atr_m5": micro.atr_m5,
             "atr_m1": micro.atr_m1,
             "stop_atr": distance / micro.atr_m5 if micro.atr_m5 > 0 else 0.0,
+            "htf": htf.as_dict(),
         }
 
         factors = ScalpFactors(
             volatility=_volatility_factor(micro, self.cfg.min_stop_atr, self.cfg.max_stop_atr),
             session=_session_factor(snap),
-            htf_context=_htf_factor(snap, direction),
+            htf_context=htf.factor,
             news=_news_factor(snap),
             dxy=_dxy_factor(snap, direction),
             **factors_partial,

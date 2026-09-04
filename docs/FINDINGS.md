@@ -1129,3 +1129,111 @@ threshold gains a tier: *where else is this number read?*
 
 After both fixes the scalp engine trades in a backtest — detect, score, economics,
 correlation, risk, execute, close, recorded.
+
+---
+
+## 39. The higher-timeframe read was five points, and pointed at the wrong timeframes
+
+The complaint that prompted this: *"the 5m did not take a single trade in a whole week,
+it must analyze the 4h, 1h, 15m also to get precise entries."*
+
+The system did read higher timeframes — the A/A+ engine reads six of them — but the
+scalp tier's entire higher-timeframe input was one function:
+
+```python
+for tf, w in ((Timeframe.H1, 0.25), (Timeframe.H4, 0.35), (Timeframe.D1, 0.40)):
+```
+
+worth 5 points out of 100. Two things are wrong with it, and they are different kinds of
+wrong.
+
+**M15 was absent.** `MarketAnalyzer` builds M15 structure, and the setup timeframe for
+every zone in the snapshot *is* M15 — the FVGs, order blocks and pools a scalp trades
+against are M15 objects. The one place that asked "what do the higher timeframes think"
+skipped the timeframe all of its own evidence came from.
+
+**D1 outweighed everything.** The heaviest vote on a trade that closes inside ninety
+minutes came from a bar that outlives it. A daily bias could suppress a signal whose
+entire life fits inside one of its candles, and no amount of M15 and H1 agreement could
+outvote it.
+
+But the deeper error is that the read was **only a score**. Higher-timeframe context
+changes two things about a trade and the old code addressed neither:
+
+| What HTF should determine | What it did |
+|---|---|
+| whether the entry is at a level someone defends | nothing — `entry_location` was M1/M5 only |
+| where the target can realistically reach | nothing — obstacles were M1/M5 pools and S/R |
+
+The second is the one that costs money. `structural_target` pulled targets in behind
+M1/M5 pools but happily aimed 1.5R straight through an H4 resistance. That is not a 1.5R
+trade; it is a trade that stalls at the level and exits on the time stop, and the
+backtest scores it as a small loss with no indication why.
+
+`strategy/scalp/htf.py` now returns three separate things from one read — `alignment`
+(M15 0.35, H1 0.30, H4 0.25, D1 0.10), `confluence` (is the entry standing on an HTF
+FVG, order block, level, or the right half of the HTF dealing range), and `obstacles`
+(HTF levels, resting pools and opposing zones *ahead* of the entry, fed into
+`structural_target`). The factor is weighted 12 rather than 5, taken from liquidity,
+momentum, volatility, session and dxy.
+
+**Two invariants have tests because both are ways to cheat.** Obstacles can only pull a
+target *in*, never push it out — otherwise a chart opinion becomes free reward-to-risk.
+And removing a timeframe can never raise the factor: `test_dropping_a_timeframe_can_never_raise_the_factor`
+walks every subset boundary, because a data outage that unlocks trades is the exact
+shape of failure this system is built to refuse.
+
+**What this does not do:** it does not make the strategy profitable, and it is not
+evidence of an edge. Widening the read gives the scorer better information; whether
+better information produces positive expectancy after costs is an empirical question
+that only `scripts/scalp_sweep.py` on real harvested history can answer.
+
+---
+
+## 40. The scalp path could route an unvalidated strategy to real money
+
+Found while checking, for an unrelated reason, where `live_eligible` is read:
+
+```
+$ grep -rn "live_eligible" src/ --include=*.py
+src/xauusd/strategy/gates.py:213
+src/xauusd/strategy/classifier.py:120
+src/xauusd/domain/enums.py:389
+```
+
+Two call sites, both on the A/A+ path. `ScalpPipeline` was built as a deliberately
+parallel route to the same broker — same `RiskGate`, same sizing cross-check, same daily
+and weekly lockouts — and it ran five gates of its own without ever running that one. So
+the system's actual state was:
+
+| | status DEV, mode LIVE |
+|---|---|
+| A/A+ strategy | refused by `g_strategy_validated` |
+| scalp model | **routed** |
+
+Every scalp model ships DEV, because none has been validated. The whole apparatus that
+stands between "it trades" and "it should trade" — out-of-sample split, walk-forward,
+Monte Carlo, the deployment gate — expresses its verdict as a `ValidationStatus`, and
+the newest path to the broker did not read it.
+
+Nothing was wrong when either piece was written. `g_strategy_validated` correctly guards
+the gate chain it belongs to; `ScalpPipeline` correctly delegates risk to the risk
+module. The rule simply lives in the gate chain, and the scalp path is not a gate chain.
+
+**Ninth instance of the class**, and the second (after FINDINGS 38's `min_rr`) where the
+missing copy was the one on the live path. That is not a coincidence: the live path is
+the least exercised by tests and the most recently connected, so it is where a rule is
+most likely to be absent and least likely to be noticed.
+
+`scalp_strategy_validated` now runs as **stage 0** of `ScalpPipeline._evaluate`, before
+the score and before anything can approve. Deliberately first: a check that only runs
+after four other gates pass is a check the failing case has never exercised. A model
+with no database row reads as DEV — absence of evidence of validation is not evidence of
+validity — and the result is recorded on the evaluation whether it passes or fails, so
+the journal can show the check was consulted rather than merely not fired.
+
+`tests/unit/test_scalp_live_eligibility.py` asserts the routing is *impossible* rather
+than absent, including the case that matters most: a model whose signal is otherwise
+flawless — clearing the score, the RR floor and both economic gates — is still refused.
+A test whose signal could fail for another reason would pass whether or not the check
+exists.

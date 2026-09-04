@@ -29,7 +29,7 @@ from datetime import datetime
 
 from xauusd.config.settings import Settings
 from xauusd.core.micro_structure import MicroSnapshot
-from xauusd.domain.enums import Classification
+from xauusd.domain.enums import Classification, ValidationStatus
 from xauusd.domain.types import (
     AccountState,
     BrokerPosition,
@@ -129,11 +129,13 @@ class ScalpPipeline:
         open_risk_pct: float = 0.0,
         trades_today: int = 0,
         exposures: list[OpenExposure] | None = None,
+        strategy_status: dict[str, ValidationStatus] | None = None,
         broker_calc_profit=None,  # type: ignore[no-untyped-def]
     ) -> ScalpCycle:
         cycle = ScalpCycle(ts=now)
         positions = open_positions or []
         exposures = exposures or []
+        status = strategy_status or {}
 
         if not self.cfg.enabled:
             cycle.skipped = "scalp engine disabled"
@@ -177,6 +179,7 @@ class ScalpPipeline:
                     open_risk_pct,
                     trades_today,
                     exposures,
+                    status,
                     broker_calc_profit,
                 )
                 cycle.evaluations.append(ev)
@@ -201,10 +204,39 @@ class ScalpPipeline:
         open_risk_pct: float,
         trades_today: int,
         exposures: list[OpenExposure],
+        strategy_status: dict[str, ValidationStatus],
         broker_calc_profit,  # type: ignore[no-untyped-def]
     ) -> ScalpEvaluation:
         score = self.scorer.score(signal.factors)
         ev = ScalpEvaluation(signal=signal, score=score.total, score_detail=score.as_dict())
+
+        # --- stage 0: may this strategy reach real money at all? ---------------------
+        # The A/A+ chain has enforced this since the beginning (`g_strategy_validated`),
+        # and the scalp path did not — so in LIVE mode an unvalidated scalp model could
+        # route to the broker while an unvalidated A/A+ strategy could not. Every scalp
+        # model currently ships DEV, which is exactly the state this refuses.
+        #
+        # It runs FIRST and unconditionally: a check that only runs after four other
+        # gates pass is a check that has never been exercised by the failing case.
+        status = strategy_status.get(signal.model, ValidationStatus.DEV)
+        live_ok = status.live_eligible or not self.settings.mode.is_real_money
+        ev.checks.append(
+            GateResult(
+                "scalp_strategy_validated",
+                live_ok,
+                str(status),
+                "OOS_PASSED or better for live trading",
+                detail=(
+                    ""
+                    if live_ok
+                    else f"{signal.model} has not passed out-of-sample validation; "
+                    f"live routing refused"
+                ),
+            )
+        )
+        if not live_ok:
+            ev.rejected_by = "scalp_strategy_validated"
+            return ev
 
         # --- stage 1: score --------------------------------------------------------
         passed = score.total >= self.cfg.min_score

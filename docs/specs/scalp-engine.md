@@ -271,6 +271,54 @@ a tighter configuration (`swing_lookback` 1, lower displacement thresholds). Thi
 deliberate: a second implementation of BOS/CHOCH/MSS would be a second thing to keep
 correct, and the parity test only guards one.
 
+#### C.1.1 What HIGHER and INTRADAY actually do — `strategy/scalp/htf.py`
+
+The table above says "context, soft for scalps", which as first implemented meant a
+single 5-point score factor comparing H1/H4/D1 bias — with M15 absent and D1 weighted
+heaviest. See FINDINGS 39 for why both of those were wrong.
+
+One read of H4/H1/M15 now produces **three** outputs, because they answer three
+different questions and only the third changes a trade:
+
+| Output | Question | Where it goes |
+|---|---|---|
+| `alignment` | do M15/H1/H4 agree with the direction? | score factor |
+| `confluence` | is the ENTRY on an HTF level someone defends? | score factor |
+| `obstacles` | what is between the entry and the target? | `structural_target` |
+
+**Alignment weights.** M15 0.35, H1 0.30, H4 0.25, D1 0.10. Weighted toward the
+timeframes that bound a ninety-minute hold. D1 survives at a small weight because a
+violent daily trend is still information, but it no longer outvotes M15 and H1 on a
+trade that none of its bars will outlive.
+
+**Confluence sources**, each worth a quarter, counted rather than averaged so one strong
+feature registers and four are worth more than one:
+
+1. an HTF fair value gap in the trade's direction at the entry (within 0.50 M5 ATR);
+2. an HTF order block in the trade's direction at the entry;
+3. an HTF level on the supporting side — support under a long, resistance over a short;
+4. discount for a long / premium for a short in the HTF dealing range.
+
+**Obstacles** are HTF S/R band edges, resting HTF pools and opposing HTF zone edges,
+restricted to prices *ahead* of the entry. A level behind the entry cannot stop the
+trade, and admitting one would let `structural_target` drag the target backwards through
+the entry into negative reward-to-risk.
+
+Two invariants are tested rather than assumed, because both are ways to cheat:
+
+- **Obstacles can only pull a target in.** If a higher-timeframe read could push a
+  target *out*, a chart opinion would become free reward-to-risk. Asserted directly
+  against `structural_target` for both directions.
+- **Losing a timeframe can never raise the factor.** A missing structure scores 0.25 of
+  its weight — below the 0.5 a genuinely neutral bias earns — and the test walks every
+  subset boundary. A data outage that unlocks trades is precisely the failure mode this
+  system exists to refuse.
+
+The score weight moves 5 → 12 (taken from liquidity, momentum, volatility, session and
+dxy; the validator still proves the total is 100). That is a better-informed factor
+being weighted like one — **not** evidence that it improves expectancy, which remains an
+open empirical question for §E.
+
 ---
 
 ## C.2 All-hours operation

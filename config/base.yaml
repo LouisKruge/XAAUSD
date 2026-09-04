@@ -40,7 +40,11 @@ scalp:
     - scalp_breakout_retest
     - scalp_momentum_continuation
   risk_pct: 0.0015            # 10 concurrent would be 1.50%, inside the 2% cap
-  max_concurrent: 1           # raised only when the correlation gate is wired live
+  # The correlation gate is wired into ScalpPipeline and consulted on every candidate,
+  # so positions can now overlap. 5 x 0.15% = 0.75% open risk, well inside the 2% cap,
+  # and the same-zone / same-pool / same-model budgets stop those five becoming one
+  # leveraged bet. Raise further only on evidence from the cluster-drawdown metric.
+  max_concurrent: 5
   max_cost_fraction: 0.35     # costs may not exceed 35% of 1R
   min_net_expectancy_r: 0.05  # positive by a margin, not by a rounding error
   assumed_win_probability: 0.55

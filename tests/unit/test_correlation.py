@@ -196,10 +196,21 @@ class TestTheTraceIsComplete:
         assert not d.approved
 
 
-class TestConcurrencyStaysLockedUntilThisExists:
-    def test_the_config_still_refuses_more_than_one(self) -> None:
-        """The guard is deliberately not lifted by this commit. The budgets exist, but
-        nothing wires them into the live path yet, and an unwired gate is exactly the
-        failure this project keeps finding."""
-        with pytest.raises(ValueError, match="correlation gate"):
-            Settings(scalp={"max_concurrent": 10})
+class TestConcurrencyIsNowAllowedButStillBounded:
+    """The lock lifted once ScalpPipeline actually consulted these budgets on every
+    candidate. What replaced it is arithmetic rather than a flag: N positions at
+    risk_pct each must fit inside the unchanged 2% global cap, because that is what
+    stops a correlated cluster becoming one leveraged bet."""
+
+    def test_overlapping_positions_are_permitted(self) -> None:
+        assert Settings(scalp={"max_concurrent": 5, "risk_pct": 0.0015}).scalp.max_concurrent == 5
+
+    def test_a_book_that_breaches_the_global_cap_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="breaches the 2% global cap"):
+            Settings(scalp={"max_concurrent": 20, "risk_pct": 0.0015})
+
+    def test_raising_risk_shrinks_the_permitted_book(self) -> None:
+        """The two settings trade against each other; neither can be raised alone."""
+        assert Settings(scalp={"max_concurrent": 4, "risk_pct": 0.005}).scalp.max_concurrent == 4
+        with pytest.raises(ValueError, match="breaches"):
+            Settings(scalp={"max_concurrent": 5, "risk_pct": 0.005})

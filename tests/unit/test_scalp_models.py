@@ -206,9 +206,13 @@ class TestTheScorer:
     def test_a_nan_factor_cannot_poison_the_total(self) -> None:
         """A NaN would compare false against every threshold and reject the signal for
         no stated reason. Warm-up must reject loudly, not invisibly."""
-        score = ScalpScorer().score(ScalpFactors(momentum=float("nan"), liquidity=1.0))
+        weights = ScalpScoreWeights()
+        score = ScalpScorer(weights).score(ScalpFactors(momentum=float("nan"), liquidity=1.0))
         assert score.total == score.total, "score must not be NaN"
-        assert score.total == pytest.approx(20.0)
+        # Read the weight rather than hardcode it: the assertion is that NaN scores
+        # ZERO, not that liquidity is worth any particular number of points, and a test
+        # that fails when a weight is retuned tests the wrong thing.
+        assert score.total == pytest.approx(weights.liquidity)
 
     def test_weights_must_total_one_hundred(self) -> None:
         with pytest.raises(ValueError, match="must total 100"):

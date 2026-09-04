@@ -496,6 +496,7 @@ class TradingEngine:
             open_risk_pct=self._open_risk(positions, account.equity, spec),
             trades_today=self.trades_today,
             exposures=self._scalp_exposures(positions, account.equity, spec),
+            strategy_status=self._strategy_status(),
             broker_calc_profit=None,
         )
 

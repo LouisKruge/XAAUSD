@@ -36,6 +36,7 @@ class TestOnlyAllowlistedWorkRuns:
             "validate",
             "backtest",
             "harvest",
+            "scalp_sweep",
         }
 
     def test_no_job_reaches_a_shell(self) -> None:
@@ -189,4 +190,5 @@ class TestTheJobApiIsGuardedToo:
             "validate",
             "backtest",
             "harvest",
+            "scalp_sweep",
         }

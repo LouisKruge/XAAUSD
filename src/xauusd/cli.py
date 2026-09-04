@@ -464,6 +464,12 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     print("Rejection ledger (why it did not trade):")
     for gate, n in list(result.rejection_ledger.items())[:12]:
         print(f"  {gate:<30} {n}")
+    # A ledger names the gate that refused each candidate but never says whether that
+    # gate is picking the best of many or refusing all of them, and those look identical
+    # from a zero-trade run. The distribution beside the threshold says which.
+    if settings.scalp.enabled and settings.scalp.enabled_models:
+        print()
+        print(result.scalp_diagnosis(settings.scalp.min_score))
     if args.json:
         Path(args.json).write_text(
             json.dumps(

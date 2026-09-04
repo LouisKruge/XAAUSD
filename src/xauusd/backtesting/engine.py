@@ -87,6 +87,10 @@ class BacktestResult:
     bars_evaluated: int
     wall_seconds: float
     rejection_ledger: dict[str, int] = field(default_factory=dict)
+    # Every scalp candidate's score, whether or not it traded. Kept because a run that
+    # reports "0 trades" and nothing else cannot be told apart from a run where the
+    # models found nothing — and those need opposite responses. See `scalp_diagnosis`.
+    scalp_scores: list[float] = field(default_factory=list)
 
     @property
     def equity(self) -> list[float]:
@@ -98,6 +102,57 @@ class BacktestResult:
             f"{self.bars_evaluated} bars, {len(self.decisions)} decisions\n"
             f"  {self.metrics.summary_line()}"
         )
+
+    def scalp_diagnosis(self, min_score: float) -> str:
+        """Why the scalp engine traded as often as it did, in its own numbers.
+
+        A zero-trade report is ambiguous in the most expensive way: "the models found
+        nothing" and "the models found plenty and one threshold refused all of it" look
+        identical from outside, and the correct response to each is the opposite of the
+        response to the other. A week of real M1 history producing no trades sent this
+        project looking for a data problem when the actual answer was that `min_score`
+        sat one point above the 90th percentile of the scores the models can produce.
+
+        So the run states the distribution beside the threshold that judged it.
+        """
+        n = len(self.scalp_scores)
+        if not n:
+            return (
+                "Scalp engine: no candidates at all. The models found no pattern — "
+                "this is a market/data question, not a threshold one."
+            )
+        v = sorted(self.scalp_scores)
+
+        def pct(q: float) -> float:
+            return v[min(n - 1, int(n * q))]
+
+        cleared = sum(1 for x in v if x >= min_score)
+        # Where the threshold sits in the observed distribution: the number that says
+        # whether it is selecting the best candidates or excluding all of them.
+        below = sum(1 for x in v if x < min_score)
+        percentile = 100.0 * below / n
+        lines = [
+            f"Scalp engine: {n} candidates scored, {cleared} cleared min_score "
+            f"{min_score:.0f} ({100.0 * cleared / n:.1f}%)",
+            f"  score p10/p50/p90/max : {pct(0.10):.0f} / {pct(0.50):.0f} / "
+            f"{pct(0.90):.0f} / {v[-1]:.0f}",
+            f"  min_score {min_score:.0f} sits at the {percentile:.0f}th percentile "
+            f"of what the models actually produced",
+        ]
+        if cleared == 0:
+            lines.append(
+                f"  NOTHING cleared it. The binding constraint is the threshold, not "
+                f"the market: the best candidate in the whole run scored {v[-1]:.0f}. "
+                f"Sweep min_score on this history before concluding anything about the "
+                f"strategy — and do not simply lower it to whatever trades."
+            )
+        elif percentile >= 95.0:
+            lines.append(
+                "  Above the 95th percentile: the sample of trades this produces is "
+                "too small to measure an edge with. Widen it or accept that the result "
+                "is noise."
+            )
+        return "\n".join(lines)
 
 
 class BacktestEngine:
@@ -161,6 +216,7 @@ class BacktestEngine:
         decisions: list[Decision] = []
         equity_curve: list[tuple[datetime, float]] = []
         rejections: dict[str, int] = {}
+        scalp_scores: list[float] = []
         open_tags: set[str] = set()
         trades_today = 0
         current_day: date | None = None
@@ -251,12 +307,17 @@ class BacktestEngine:
                     open_risk_pct=open_risk,
                     trades_today=trades_today,
                     exposures=self._scalp_exposures(broker.positions()),
+                    strategy_status=self.strategy_status,
                 )
                 if scalp_cycle.skipped:
                     rejections[f"scalp:{scalp_cycle.skipped}"] = (
                         rejections.get(f"scalp:{scalp_cycle.skipped}", 0) + 1
                     )
                 for ev in scalp_cycle.evaluations:
+                    # Every candidate's score, approved or not. The rejection ledger
+                    # says WHICH gate refused it; only the distribution says whether
+                    # that gate is selecting good candidates or excluding all of them.
+                    scalp_scores.append(ev.score)
                     if not ev.approved:
                         key = f"scalp:{ev.rejected_by}"
                         rejections[key] = rejections.get(key, 0) + 1
@@ -303,6 +364,7 @@ class BacktestEngine:
             bars_evaluated=end_index - cfg.warmup_bars,
             wall_seconds=time.perf_counter() - t_start,
             rejection_ledger=dict(sorted(rejections.items(), key=lambda kv: -kv[1])),
+            scalp_scores=scalp_scores,
         )
 
     # -- helpers -----------------------------------------------------------------------
@@ -424,6 +486,12 @@ class BacktestEngine:
             return True
         return False
 
+    def _strategy_of(self, position) -> str | None:  # type: ignore[no-untyped-def]
+        """Which strategy opened this position, for the rules that differ by tier."""
+        decision = self._decision_by_tag.get(position.client_tag)
+        plan = decision.plan if decision else None
+        return plan.strategy if plan else None
+
     def _manage(self, broker: SimBroker, now: datetime, bar) -> None:  # type: ignore[no-untyped-def]
         """Break-even, structural trail and time stop, using the same rules as live."""
         e = self.settings.execution
@@ -440,7 +508,10 @@ class BacktestEngine:
 
             # time stop: a thesis that has not begun to work is tying up risk budget
             sim = broker._positions.get(p.ticket)
-            if e.time_stop_bars and sim and sim.bars_held >= e.time_stop_bars:
+            limit = self.settings.time_stop_bars_for(
+                self._strategy_of(p), self.cfg.decision_timeframe.seconds
+            )
+            if limit and sim and sim.bars_held >= limit:
                 if r_now < e.time_stop_min_r:
                     broker.close_position(p.ticket)
                     continue

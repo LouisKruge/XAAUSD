@@ -112,6 +112,27 @@ class BacktestJob(JobSpec):
 
 
 @dataclass
+class ScalpSweepJob(JobSpec):
+    """Replace two guessed thresholds with measured ones.
+
+    min_score 65 and target_rr 1.5 were judgement calls. This is how they stop being
+    judgement calls — and how you find out whether there is anything to measure.
+    """
+
+    def argv(self, values: dict[str, int]) -> list[str]:
+        return [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "scalp_sweep.py"),
+            "--warmup",
+            str(values["warmup"]),
+            "--step",
+            str(values["step"]),
+            "--min-trades",
+            str(values["min_trades"]),
+        ]
+
+
+@dataclass
 class HarvestJob(JobSpec):
     """Download real bars from the broker so a backtest can mean something."""
 
@@ -159,6 +180,19 @@ JOBS: dict[str, JobSpec] = {
             "MT5 bridge to be running. A few minutes for 60,000 bars."
         ),
         params={"bars": (60000, 5000, 400000)},
+    ),
+    "scalp_sweep": ScalpSweepJob(
+        key="scalp_sweep",
+        title="Sweep the scalp thresholds",
+        description=(
+            "Runs the scalp engine across a grid of score thresholds and target RRs on "
+            "your real harvested history, reporting NET expectancy after spread, "
+            "commission and slippage. This is how min_score and target_rr stop being "
+            "guesses. It reports honestly when no configuration has an edge, and "
+            "refuses to rank anything with too few trades to mean something. Slow: "
+            "one full backtest per grid point."
+        ),
+        params={"warmup": (2000, 200, 20000), "step": (3, 1, 60), "min_trades": (30, 5, 500)},
     ),
     "backtest": BacktestJob(
         key="backtest",

@@ -215,7 +215,8 @@ class PositionManager:
                     )
 
             # 5) time stop — a thesis that has not begun to work is tying up risk budget
-            if e.time_stop_bars and mp.bars_held >= e.time_stop_bars and r_now < e.time_stop_min_r:
+            limit = self.settings.time_stop_bars_for(mp.plan.strategy if mp.plan else None)
+            if limit and mp.bars_held >= limit and r_now < e.time_stop_min_r:
                 actions.append(
                     self._close(
                         mp, ExitReason.TIME_STOP, f"{mp.bars_held} bars held at only {r_now:.2f}R"

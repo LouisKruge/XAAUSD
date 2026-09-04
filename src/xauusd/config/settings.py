@@ -278,34 +278,47 @@ class ScalpConfig(ConfigSection):
     enabled_models: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _concurrency_needs_the_correlation_gate(self) -> ScalpConfig:
+    def _concurrency_is_bounded_by_the_risk_budget(self) -> ScalpConfig:
         """Ten correlated XAUUSD positions are one bet sized ten times.
 
         Monte Carlo over 200k clusters: at rho=0.7 a single losing cluster exhausts the
-        whole 2% daily limit on 14% of days. Until the correlation gate exists to make
-        the positions genuinely different trades, concurrency above 1 is refused here
-        rather than discovered live.
+        whole 2% daily limit on 14% of days. The correlation gate now exists and
+        ScalpPipeline consults it on every candidate, so concurrency above 1 is allowed
+        — but the arithmetic still has to hold: N positions at risk_pct each must fit
+        inside the 2% global open-risk cap, which is what actually stops a cluster from
+        becoming a single leveraged bet.
         """
-        if self.max_concurrent > 1:
+        exposure = self.max_concurrent * self.risk_pct
+        if exposure > 0.02:
             raise ValueError(
-                "scalp.max_concurrent above 1 requires the correlation gate "
-                "(risk/correlation.py), which is not implemented yet"
+                f"scalp.max_concurrent {self.max_concurrent} x risk_pct "
+                f"{self.risk_pct:.2%} = {exposure:.2%} open risk, which breaches the "
+                f"2% global cap. Lower one or the other."
             )
         return self
 
 
 class ScalpScoreWeights(ConfigSection):
-    """0-100, and the validator enforces it. Initial hypothesis, to be optimised."""
+    """0-100, and the validator enforces it. Initial hypothesis, to be optimised.
+
+    `htf_context` carries 12 rather than its original 5. That original number was set
+    when the higher-timeframe read was a single bias comparison across H1/H4/D1 — worth
+    about what five points implied. It now reads M15, H1 and H4 for both directional
+    agreement and entry confluence (see `strategy/scalp/htf.py`), which is a materially
+    better-informed factor, so it is weighted like one. The points came from liquidity,
+    momentum, volatility, session and dxy; the total is still 100 and the validator
+    still proves it.
+    """
 
     market_structure: float = 20.0
-    liquidity: float = 20.0
-    momentum: float = 15.0
+    liquidity: float = 18.0
+    momentum: float = 13.0
     entry_location: float = 15.0
-    volatility: float = 10.0
-    session: float = 5.0
-    dxy: float = 5.0
+    volatility: float = 9.0
+    session: float = 4.0
+    dxy: float = 4.0
     news: float = 5.0
-    htf_context: float = 5.0
+    htf_context: float = 12.0
 
     @model_validator(mode="after")
     def _totals_one_hundred(self) -> ScalpScoreWeights:
@@ -653,6 +666,22 @@ class Settings(BaseSettings):
         if self.mode is Mode.LIVE and not self.live_trading:
             raise ValueError("mode=LIVE requires live_trading=true (two-key arming)")
         return self
+
+    def time_stop_bars_for(self, strategy: str | None, bar_seconds: int = 300) -> int:
+        """How many decision bars a position of this kind may be held.
+
+        A/A+ uses `execution.time_stop_bars` — 48 M5 bars, four hours, right for a
+        trade that needs room to work. Applying it to a scalp turns a 90-minute setup
+        into an accidental swing trade held three times its design, and the whole
+        premise of the short-duration engine is return per unit of TIME.
+
+        `scalp.max_hold_minutes` existed as configuration that nothing read. One
+        definition, keyed on the strategy that opened the position, so the backtester
+        and the live position manager cannot disagree.
+        """
+        if strategy and strategy.startswith("scalp"):
+            return max(1, round(self.scalp.max_hold_minutes * 60 / max(bar_seconds, 1)))
+        return self.execution.time_stop_bars
 
     def min_rr_for(self, classification: object) -> float:
         """The reward-to-risk floor that applies to this trade tier.
