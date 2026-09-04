@@ -336,3 +336,66 @@ def _plant_long_setup(seed: int, t0: datetime, uptrend_bars: int) -> dict[Timefr
     return build_timeframes(
         m5, [Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1, Timeframe.W1]
     )
+
+
+def market_m1(
+    n_m1: int = 12_000,
+    start_price: float = 2400.0,
+    drift_per_bar: float = 0.004,
+    noise: float = 0.22,
+    seed: int = 17,
+    start: datetime | None = None,
+) -> dict[Timeframe, BarSeries]:
+    """A consistent multi-timeframe market built from an M1 path.
+
+    `market()` starts at M5 and aggregates upward, so it has no M1 at all — which the
+    scalp engine needs, since M1 is its trigger timeframe. Building M1 first and
+    aggregating gives the same internal consistency: the M5 bars a stop rests on are
+    literally composed of the M1 bars the entry is timed from, rather than two
+    independent random walks that disagree.
+
+    Drift and noise are scaled down from the M5 defaults by roughly sqrt(5), so a run of
+    five M1 bars has about the same range as one M5 bar of `market()`.
+    """
+    from xauusd.data.resample import build_timeframes
+
+    rng = np.random.RandomState(seed)
+    t0 = start or datetime(2026, 1, 4, 22, 0, tzinfo=UTC)
+
+    steps = np.arange(n_m1)
+    hour = ((t0.hour * 3600 + steps * 60) // 3600) % 24
+    activity = np.where((hour >= 7) & (hour < 21), 1.0, 0.45)
+
+    rets = drift_per_bar + rng.randn(n_m1) * noise * activity
+    closes = start_price + np.cumsum(rets)
+
+    bars = []
+    prev = start_price
+    for i, c in enumerate(closes):
+        o = prev
+        hi = max(o, c) + abs(rng.randn()) * noise * activity[i] * 1.4
+        lo = min(o, c) - abs(rng.randn()) * noise * activity[i] * 1.4
+        ts = t0 + timedelta(minutes=i)
+        if ts.weekday() == 5 or (ts.weekday() == 6 and ts.hour < 22):
+            prev = float(c)
+            continue
+        bars.append(
+            Bar(
+                ts,
+                float(o),
+                float(hi),
+                float(lo),
+                float(c),
+                tick_volume=int(20 * activity[i] + rng.randint(0, 15)),
+                spread_points=int(20 + (1 - activity[i]) * 25),
+            )
+        )
+        prev = float(c)
+
+    m1 = BarSeries.from_bars(Timeframe.M1, bars)
+    built = build_timeframes(
+        m1,
+        [Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1, Timeframe.W1],
+    )
+    built[Timeframe.M1] = m1
+    return built

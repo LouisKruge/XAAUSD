@@ -226,6 +226,105 @@ class StructureConfig(ConfigSection):
     max_swings_tracked: int = Field(40, ge=4)
 
 
+class MicroStructureConfig(StructureConfig):
+    """Structure detection tuned for M1/M5 rather than M15 and above.
+
+    Deliberately the same class with different numbers, not a second algorithm. A
+    separate implementation of BOS/CHOCH/MSS would be a second thing to keep correct,
+    and the parity test only guards one. What changes on a fast timeframe is what
+    counts as a swing and how much displacement is meaningful — both already
+    configurable.
+    """
+
+    swing_lookback: int = Field(1, ge=1, le=10)
+    swing_min_atr: float = Field(0.15, ge=0)
+    bos_min_displacement_atr: float = Field(0.30, ge=0)
+    mss_min_displacement_atr: float = Field(0.45, ge=0)
+    atr_period: int = Field(14, ge=2)
+    max_swings_tracked: int = Field(60, ge=4)
+
+
+class ScalpConfig(ConfigSection):
+    """The short-duration engine. Disabled by default and validated per model.
+
+    Every threshold here is a starting point for the out-of-sample sweep, not a
+    validated value. `enabled` stays False until a model has cleared the gate.
+    """
+
+    enabled: bool = False
+    scan_interval_seconds: float = Field(2.0, gt=0, le=60)
+
+    # Risk. 10 concurrent at 0.15% is 1.50%, inside the unchanged 2% global cap.
+    risk_pct: float = Field(0.0015, gt=0, le=0.005)
+    max_concurrent: int = Field(1, ge=1, le=20)
+
+    # Economics. The gates that replace min_rr for this engine.
+    max_cost_fraction: float = Field(0.35, gt=0, le=1.0)
+    min_net_expectancy_r: float = Field(0.05, ge=0)
+    assumed_win_probability: float = Field(0.55, gt=0, lt=1)
+
+    # Targets. The sweep searches this band; below min_gross_rr a high win rate stops
+    # being worth having, so the optimiser cannot buy win rate by shrinking targets.
+    target_rr: float = Field(1.5, gt=0, le=5)
+    min_gross_rr: float = Field(1.25, gt=0, le=5)
+
+    # Score. Thresholds to be optimised, not assumed.
+    min_score: float = Field(65.0, ge=0, le=100)
+
+    max_hold_minutes: int = Field(90, ge=1, le=1440)
+    min_stop_atr: float = Field(0.8, gt=0, description="Floor on stop width, in M5 ATR.")
+    max_stop_atr: float = Field(3.5, gt=0, description="Ceiling; wider is not a scalp.")
+
+    enabled_models: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _concurrency_needs_the_correlation_gate(self) -> ScalpConfig:
+        """Ten correlated XAUUSD positions are one bet sized ten times.
+
+        Monte Carlo over 200k clusters: at rho=0.7 a single losing cluster exhausts the
+        whole 2% daily limit on 14% of days. Until the correlation gate exists to make
+        the positions genuinely different trades, concurrency above 1 is refused here
+        rather than discovered live.
+        """
+        if self.max_concurrent > 1:
+            raise ValueError(
+                "scalp.max_concurrent above 1 requires the correlation gate "
+                "(risk/correlation.py), which is not implemented yet"
+            )
+        return self
+
+
+class ScalpScoreWeights(ConfigSection):
+    """0-100, and the validator enforces it. Initial hypothesis, to be optimised."""
+
+    market_structure: float = 20.0
+    liquidity: float = 20.0
+    momentum: float = 15.0
+    entry_location: float = 15.0
+    volatility: float = 10.0
+    session: float = 5.0
+    dxy: float = 5.0
+    news: float = 5.0
+    htf_context: float = 5.0
+
+    @model_validator(mode="after")
+    def _totals_one_hundred(self) -> ScalpScoreWeights:
+        total = (
+            self.market_structure
+            + self.liquidity
+            + self.momentum
+            + self.entry_location
+            + self.volatility
+            + self.session
+            + self.dxy
+            + self.news
+            + self.htf_context
+        )
+        if abs(total - 100.0) > 1e-6:
+            raise ValueError(f"scalp score weights must total 100, got {total}")
+        return self
+
+
 class LiquidityConfig(ConfigSection):
     equal_level_tolerance_atr: float = Field(0.10, gt=0, le=1.0)
     min_equal_touches: int = Field(2, ge=2)
@@ -503,6 +602,9 @@ class Settings(BaseSettings):
     thresholds: StrategyThresholds = Field(default_factory=StrategyThresholds)
     scoring: ScoringWeights = Field(default_factory=ScoringWeights)
     structure: StructureConfig = Field(default_factory=StructureConfig)
+    micro_structure: MicroStructureConfig = Field(default_factory=MicroStructureConfig)
+    scalp: ScalpConfig = Field(default_factory=ScalpConfig)
+    scalp_score: ScalpScoreWeights = Field(default_factory=ScalpScoreWeights)
     liquidity: LiquidityConfig = Field(default_factory=LiquidityConfig)
     fvg: FVGConfig = Field(default_factory=FVGConfig)
     order_block: OrderBlockConfig = Field(default_factory=OrderBlockConfig)

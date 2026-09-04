@@ -533,39 +533,52 @@ def cmd_harvest(args: argparse.Namespace) -> int:
     db = Database(settings.database.url)
     broker = build_broker(settings)
     symbol = resolve_broker_symbol(broker, settings)
-    held, first, last = coverage(db, symbol, Timeframe.M5, source=args.source)
     print(f"symbol           : {symbol}")
-    print(
-        f"already held     : {held} M5 bars"
-        + (f"  ({first:%Y-%m-%d} -> {last:%Y-%m-%d})" if held else "")
-    )
-    print(f"requesting       : {args.bars} bars, newest first\n")
+
+    # M5 carries the structure a stop rests on; M1 is the scalp engine's trigger
+    # timeframe and it cannot run without it. Harvesting only M5 leaves the scalp
+    # models permanently in warm-up, reporting "not usable" forever — which looks
+    # exactly like a market with no setups.
+    plan = [(Timeframe.M5, args.bars)]
+    if not args.no_m1:
+        plan.append((Timeframe.M1, args.m1_bars))
 
     def show(done: int, want: int) -> None:
         print(f"   {done:>7,} / {want:,}", end="\r", flush=True)
 
-    report = harvest(
-        broker,
-        db,
-        symbol,
-        Timeframe.M5,
-        wanted=args.bars,
-        source=args.source,
-        progress=show,
-    )
-
-    print(" " * 40, end="\r")
-    print(report.summary())
-
-    held, _, _ = coverage(db, symbol, Timeframe.M5, source=args.source)
-    print(f"\nheld now         : {held} M5 bars")
-    if held < 5000:
+    ok = True
+    for timeframe, wanted in plan:
+        held, first, last = coverage(db, symbol, timeframe, source=args.source)
         print(
-            "                   that is below the 5000 a backtest needs; run this "
-            "again when the terminal has more history loaded."
+            f"\n{timeframe!s:<3} already held : {held} bars"
+            + (f"  ({first:%Y-%m-%d} -> {last:%Y-%m-%d})" if held else "")
         )
+        print(f"    requesting   : {wanted:,} bars, newest first")
+        report = harvest(
+            broker,
+            db,
+            symbol,
+            timeframe,
+            wanted=wanted,
+            source=args.source,
+            progress=show,
+        )
+        print(" " * 44, end="\r")
+        print(f"    {report.summary()}")
+
+        held, _, _ = coverage(db, symbol, timeframe, source=args.source)
+        floor = 5000 if timeframe is Timeframe.M5 else 2000
+        print(f"    held now     : {held} bars")
+        if held < floor:
+            print(
+                f"                   below the {floor} needed; run again when the "
+                f"terminal has more {timeframe} history loaded."
+            )
+            ok = False
+
+    if not ok:
         return 1
-    print("                   enough to backtest. Run a backtest without --synthetic.")
+    print("\nEnough history to backtest. Run a backtest with synthetic set to 0.")
     return 0
 
 
@@ -752,6 +765,10 @@ def main(argv: list[str] | None = None) -> int:
 
     hv = sub.add_parser("harvest", help="download real bar history from the broker")
     hv.add_argument("--bars", type=int, default=60_000, help="how many M5 bars to hold")
+    hv.add_argument(
+        "--m1-bars", type=int, default=40_000, help="how many M1 bars to hold (scalp trigger)"
+    )
+    hv.add_argument("--no-m1", action="store_true", help="skip M1; the scalp engine needs it")
     hv.add_argument("--source", default="mt5")
     hv.set_defaults(func=cmd_harvest)
 

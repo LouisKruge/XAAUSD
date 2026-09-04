@@ -1022,3 +1022,59 @@ and check that something implements each one.
 number. `synthetic` now defaults to 0 (real history) in the job catalogue, so the easy
 button gives a meaningful answer or an honest complaint about missing data — never a
 confident-looking zero.
+
+---
+
+## 37. Two scalp models could not fire, and it looked exactly like a quiet market
+
+The first scan of the new scalp engine over 998 instants: `sweep_reversal` 14 signals,
+`breakout_retest` 6, `momentum_continuation` 4, and **`fvg_retracement` 0,
+`ob_reaction` 0.**
+
+Two of five models silent is easy to explain away — those patterns are rarer, the
+synthetic fixture is thin, the proximity filter is tight. All plausible, all wrong.
+
+Instrumenting the funnel inside those two models:
+
+```
+fvg_tradable        381      gaps of the right direction, unmitigated
+fvg_displacement    381      all of them clear the displacement threshold
+fvg_near             79      price is close enough to trade
+fvg_stop_ok           0      <-- every one rejected
+fvg_stop_too_tight   79
+```
+
+Not one candidate in seventy-nine failed on the market. They failed on geometry. The
+entry was placed at the gap edge *nearest invalidation* and the stop just beyond that
+same edge, so the stop distance was the buffer alone — a constant `0.30 × ATR`, against
+a configured floor of `0.80 × ATR`. The model could not produce a valid signal at any
+price, on any data, ever. Same bug, same line, in the order-block model.
+
+The reasoning that produced it was superficially sound and written into the docstring:
+"entry sits at the gap edge nearest invalidation — the whole point is a known, close
+stop". True as far as it goes, and it forgot that the stop has to sit somewhere *past*
+the invalidation, which meant entry and stop collapsed onto the same level.
+
+Corrected, entry goes at the edge price reaches *first* on the retrace — the
+conservative fill, since a limit deeper in the gap only fills if price traverses the
+whole thing — and the stop sits beyond the far edge. Risk is then the zone height plus
+a buffer, which is what it should always have been. Signals went from 24 to 57 and both
+models began firing.
+
+**Class of bug:** a component that is complete, imports cleanly, is called on every
+cycle, and is structurally incapable of producing output. It cannot be distinguished
+from correct-but-quiet by watching it, only by instrumenting it. This is the sixth
+variant in this project of "looks finished from the outside" — after four
+producer/consumer pairs and one verifier that used a different code path from the thing
+it verified.
+
+**The guard:** `tests/unit/test_scalp_models.py` asserts each model fires at least once
+over the scan, with a message saying explicitly that a silent model and an absent
+pattern need opposite responses and the test must be investigated rather than relaxed.
+
+**Second bug, found by a test written for the first.** `ScalpScorer` clamped factors
+with `max(0.0, min(1.0, x))`. In Python `min(1.0, nan)` returns `1.0`, so a NaN factor
+scored **full marks** — warm-up would have inflated a score rather than suppressing it,
+in the one place where a number decides whether to risk money. Degradation is supposed
+to be one-directional everywhere in this system; here it was inverted. `clamp01` sends
+NaN to zero, and a test pins it.
