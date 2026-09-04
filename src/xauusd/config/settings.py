@@ -654,6 +654,26 @@ class Settings(BaseSettings):
             raise ValueError("mode=LIVE requires live_trading=true (two-key arming)")
         return self
 
+    def min_rr_for(self, classification: object) -> float:
+        """The reward-to-risk floor that applies to this trade tier.
+
+        There is one definition because there were four checks. The A/A+ 1:2 floor was
+        applied to scalps in the risk gate, in the backtester's execution step and in
+        the live order manager's preflight — so a scalp targeting 1.5R was approved by
+        risk and then silently refused at send time, in both backtest and live. Each
+        check was individually correct for the engine it was written for.
+
+        min_rr asks reward against risk and ignores what the trade costs, which is the
+        wrong question for a trade held minutes; the scalp tier answers it with the
+        cost and net-expectancy gates and carries its own gross-RR floor so a high win
+        rate cannot be bought by shrinking the target. A/A+ keeps 2.0, unchanged.
+        """
+        from xauusd.domain.enums import Classification
+
+        if classification is Classification.SCALP:
+            return self.scalp.min_gross_rr
+        return self.thresholds.min_rr
+
     def config_hash(self) -> str:
         payload = json.dumps(self.model_dump(mode="json"), sort_keys=True, default=str)
         return hashlib.blake2s(payload.encode(), digest_size=12).hexdigest()

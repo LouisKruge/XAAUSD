@@ -191,11 +191,7 @@ class RiskGate:
         # question with the cost and net-expectancy gates instead, which are stricter
         # for a setup whose costs eat it, and it carries its own gross-RR floor so a
         # high win rate cannot be bought by shrinking the target to nothing.
-        min_rr = (
-            self.settings.scalp.min_gross_rr
-            if classification is Classification.SCALP
-            else self.settings.thresholds.min_rr
-        )
+        min_rr = self.settings.min_rr_for(classification)
         checks.append(
             GateResult(
                 "risk.min_rr",

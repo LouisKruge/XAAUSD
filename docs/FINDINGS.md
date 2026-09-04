@@ -1078,3 +1078,54 @@ scored **full marks** — warm-up would have inflated a score rather than suppre
 in the one place where a number decides whether to risk money. Degradation is supposed
 to be one-directional everywhere in this system; here it was inverted. `clamp01` sends
 NaN to zero, and a test pins it.
+
+---
+
+## 38. The scalp engine could trade live but could not be backtested
+
+The first real-data backtest, on 39,992 harvested M1 bars:
+
+```
+0 trades
+Rejection ledger:  NO_CANDIDATE 312 | score_a 10 | session 10 | spread 6
+```
+
+Every one of those is an A/A+ gate name. `grep -c scalp src/xauusd/backtesting/engine.py`
+returned zero: `BacktestEngine` drove `DecisionPipeline` and nothing else. The scalp
+engine had been wired into the live orchestrator the commit before, so the state of the
+system was **the scalp engine can reach real money but cannot be validated** — exactly
+inverted, and it silently disabled the RR sweep, walk-forward, Monte Carlo and the 65%
+bound, which is the entire apparatus standing between "it trades" and "it should trade".
+
+Seventh instance of the same class in this project.
+
+**And behind it, a fourth copy of one number.** Wiring the backtester in produced
+`risk_approved ... classification=SCALP rr=1.5` followed by zero trades. `_execute`
+re-checks reward-to-risk at send time against `thresholds.min_rr`, which is 2.0. So the
+risk gate approved a 1.5R scalp and the execution step refused it one line later.
+
+That check existed in four places, each individually correct for the engine it was
+written for:
+
+| Where | What it guarded |
+|---|---|
+| `g_min_rr` | the A/A+ plan gate — correct, scalps never run it |
+| `RiskGate.evaluate` | fixed one commit earlier |
+| `BacktestEngine._execute` | send-time re-check, backtest |
+| `OrderManager.preflight` | send-time re-check, **live** |
+
+The live one is the dangerous one: the wired engine would have approved scalps all day
+and never sent a single order, and the rejection would have read "reward-to-risk fell to
+1.50 (floor 2.0)" — which looks like a market problem, not a configuration one.
+
+`Settings.min_rr_for(classification)` is now the only definition. A test walks the
+source tree and fails if any file outside an allowlist reads `thresholds.min_rr`
+directly, because a fifth copy would reintroduce this exactly.
+
+**Class of bug:** one rule, four enforcement points, added at four different times for
+four correct reasons. Nothing was wrong when each was written; the rule acquired an
+exception later and only three of the four learned about it. Worth asking, whenever a
+threshold gains a tier: *where else is this number read?*
+
+After both fixes the scalp engine trades in a backtest — detect, score, economics,
+correlation, risk, execute, close, recorded.

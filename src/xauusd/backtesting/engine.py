@@ -27,6 +27,7 @@ import numpy as np
 
 from xauusd.backtesting.metrics import Metrics, compute
 from xauusd.config.settings import Settings
+from xauusd.core.micro_structure import MicroAnalyzer
 from xauusd.core.sessions import SessionEngine
 from xauusd.data.marketview import InMemoryBarSource, MarketView
 from xauusd.data.series import BarSeries
@@ -49,9 +50,11 @@ from xauusd.domain.types import (
     SymbolSpec,
 )
 from xauusd.engine.pipeline import DecisionPipeline, EngineState, client_tag
+from xauusd.engine.scalp_pipeline import ScalpPipeline
 from xauusd.execution.broker import BrokerHealth
 from xauusd.execution.sim_broker import SimBroker, SimFillModel
 from xauusd.monitoring.logging import get_logger
+from xauusd.risk.correlation import OpenExposure
 from xauusd.risk.drawdown import DrawdownGuard
 from xauusd.risk.gate import RiskGate
 from xauusd.risk.kill_switch import KillSwitch
@@ -146,6 +149,13 @@ class BacktestEngine:
         risk_gate = RiskGate(self.settings, drawdown, kill_switch)
         pipeline = DecisionPipeline(self.settings, risk_gate=risk_gate)
 
+        # The scalp engine, driven by the SAME SimBroker, the same RiskGate and the
+        # same kill switch. Without this the scalp engine could trade live but never be
+        # backtested, which is exactly backwards: it would reach real money without any
+        # of the validation the deployment gate exists to demand.
+        scalp = ScalpPipeline(self.settings, risk_gate=risk_gate)
+        micro_analyzer = MicroAnalyzer(self.settings)
+
         m1 = data.get(Timeframe.M1) if cfg.manage_on_m1 else None
 
         decisions: list[Decision] = []
@@ -223,10 +233,38 @@ class BacktestEngine:
                         rejections.get(d.blocking_gate or "NO_CANDIDATE", 0) + 1
                     )
 
-            # 4) execute
+            # 4) execute the A/A+ decision
             if result.executable is not None:
                 if self._execute(broker, result.executable, now, open_tags):
                     trades_today += 1
+
+            # 5) the scalp engine, on the same bar and the same broker
+            if self.settings.scalp.enabled and self.settings.scalp.enabled_models:
+                micro = micro_analyzer.analyze(view)
+                scalp_cycle = scalp.run(
+                    micro,
+                    result.snapshot,
+                    account=self._account(broker, now),
+                    spec=self.spec,
+                    now=now,
+                    open_positions=broker.positions(),
+                    open_risk_pct=open_risk,
+                    trades_today=trades_today,
+                    exposures=self._scalp_exposures(broker.positions()),
+                )
+                if scalp_cycle.skipped:
+                    rejections[f"scalp:{scalp_cycle.skipped}"] = (
+                        rejections.get(f"scalp:{scalp_cycle.skipped}", 0) + 1
+                    )
+                for ev in scalp_cycle.evaluations:
+                    if not ev.approved:
+                        key = f"scalp:{ev.rejected_by}"
+                        rejections[key] = rejections.get(key, 0) + 1
+                if scalp_cycle.executable is not None:
+                    sd = self._scalp_decision(scalp_cycle.executable, now)
+                    decisions.append(sd)
+                    if self._execute(broker, sd, now, open_tags):
+                        trades_today += 1
 
             if cfg.progress_every and (i % cfg.progress_every == 0):
                 log.info(
@@ -310,6 +348,39 @@ class BacktestEngine:
             return None
         return [m1.bar_at(int(j)) for j in idx]
 
+    @staticmethod
+    def _scalp_exposures(positions) -> list[OpenExposure]:  # type: ignore[no-untyped-def]
+        """Open positions as the correlation budgets see them."""
+        return [
+            OpenExposure(
+                direction=p.direction,
+                risk_pct=0.0,
+                stop_price=p.stop_loss or p.entry_price,
+                opened_at=p.opened_at,
+                model="",
+                liquidity_ref=None,
+            )
+            for p in positions
+        ]
+
+    def _scalp_decision(self, ev, now: datetime) -> Decision:  # type: ignore[no-untyped-def]
+        """An approved scalp as the Decision the execution path already understands.
+
+        Carries the sizer's own result rather than recomputing it — a second sizing
+        would be a second answer, free to disagree with the one the risk gate approved.
+        """
+        return Decision(
+            ts=now,
+            symbol=self.spec.symbol,
+            classification=Classification.SCALP,
+            mode=str(self.settings.mode),
+            plan=ev.plan,
+            score=ev.score,
+            gates=tuple(ev.checks),
+            sizing=ev.sizing,
+            config_hash=self.settings.config_hash(),
+        )
+
     def _execute(
         self, broker: SimBroker, decision: Decision, now: datetime, open_tags: set[str]
     ) -> bool:
@@ -328,7 +399,7 @@ class BacktestEngine:
         # Re-price at execution and re-check RR. Slippage against us reduces RR, and a
         # trade that no longer clears 1:2 is abandoned rather than chased.
         repriced = plan.with_entry(entry_now)
-        if repriced.rr < self.settings.thresholds.min_rr:
+        if repriced.rr < self.settings.min_rr_for(decision.classification):
             return False
         drift = abs(entry_now - plan.entry) / plan.risk_distance if plan.risk_distance else 1.0
         if drift > self.settings.execution.max_entry_drift_r:

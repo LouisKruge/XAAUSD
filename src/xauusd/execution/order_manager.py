@@ -77,7 +77,13 @@ class OrderManager:
     # -- pre-send ----------------------------------------------------------------------
 
     def preflight(
-        self, plan: TradePlan, lots: float, spec: SymbolSpec, quote: Quote, now: datetime
+        self,
+        plan: TradePlan,
+        lots: float,
+        spec: SymbolSpec,
+        quote: Quote,
+        now: datetime,
+        classification: object | None = None,
     ) -> tuple[bool, str, TradePlan]:
         """Re-derive everything at send time. Nothing from the analysis cycle is trusted.
 
@@ -86,7 +92,6 @@ class OrderManager:
         actually be entered rather than the one that was analysed seconds ago.
         """
         e = self.settings.execution
-        t = self.settings.thresholds
 
         age = (now - quote.ts).total_seconds()
         if age > e.max_quote_age_seconds:
@@ -129,12 +134,13 @@ class OrderManager:
             return False, "take profit is inside the broker's stops_level", repriced
 
         rr_after = abs(tp - entry_n) / dist if dist > 0 else 0.0
-        if rr_after < t.min_rr:
+        floor = self.settings.min_rr_for(classification)
+        if rr_after < floor:
             return (
                 False,
                 (
                     f"reward-to-risk fell to {rr_after:.2f} after repricing and rounding "
-                    f"(floor {t.min_rr}); abandoning the setup"
+                    f"(floor {floor}); abandoning the setup"
                 ),
                 repriced,
             )
@@ -209,7 +215,9 @@ class OrderManager:
                 history.append(last_reason)
                 break
 
-            ok, reason, repriced = self.preflight(plan, sizing.lots, spec, quote, now)
+            ok, reason, repriced = self.preflight(
+                plan, sizing.lots, spec, quote, now, decision.classification
+            )
             if not ok:
                 history.append(f"attempt {attempt}: preflight rejected — {reason}")
                 self.persist(client_tag, str(OrderStatus.ABANDONED), {"reason": reason})

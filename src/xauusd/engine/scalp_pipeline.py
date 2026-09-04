@@ -68,6 +68,9 @@ class ScalpEvaluation:
     plan: TradePlan | None = None
     volume: float = 0.0
     risk_pct: float = 0.0
+    # The sizer's own result, carried rather than recomputed: the execution path reads
+    # it directly, and a second sizing would be a second answer free to disagree.
+    sizing: object | None = None
 
     @property
     def summary(self) -> str:
@@ -290,6 +293,7 @@ class ScalpPipeline:
             return ev
 
         ev.approved = True
+        ev.sizing = decision.sizing
         ev.volume = decision.sizing.lots if decision.sizing else 0.0
         ev.risk_pct = decision.risk_pct_applied
         return ev
