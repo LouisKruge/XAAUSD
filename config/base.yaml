@@ -109,7 +109,15 @@ order_block:
   use_wick_extremes: true
 
 session:
-  allowed_sessions: [LONDON, NEW_YORK, OVERLAP]
+  # All sessions. The clock was only ever a proxy for the spread, and the spread is
+  # measured directly: g_spread caps at max_spread_points, and the market-open /
+  # weekday / week-edge checks in is_tradable_window are independent of this list, so
+  # the weekend gap and the daily rollover break are still refused. Asian-session
+  # trading is not free — it costs ~36% of 1R against ~24% in London — but that is a
+  # per-bar economic judgement, not a calendar rule. See docs/specs/scalp-engine.md C.2.
+  # "OFF" MUST stay quoted: YAML 1.1 parses a bare OFF as the boolean false, which
+  # reaches pydantic as False and fails validation with a confusing enum error.
+  allowed_sessions: [ASIA, LONDON, NEW_YORK, OVERLAP, "OFF"]
   allowed_weekdays: [0, 1, 2, 3, 4]
   block_first_minutes_of_week: 60
   block_last_minutes_of_week: 120
