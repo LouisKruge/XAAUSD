@@ -1183,6 +1183,19 @@ And removing a timeframe can never raise the factor: `test_dropping_a_timeframe_
 walks every subset boundary, because a data outage that unlocks trades is the exact
 shape of failure this system is built to refuse.
 
+**What it cost in trade supply**, measured on the same 212 signals over the same bars,
+because pulling targets in can only reduce reward-to-risk and that had to be priced
+rather than assumed:
+
+```
+HTF obstacles OFF (old behaviour): 212 signals, 39 clear min_gross_rr 1.25 (18.4%)
+HTF obstacles ON  (new behaviour): 212 signals, 38 clear min_gross_rr 1.25 (17.9%)
+```
+
+One signal in 212. The higher-timeframe obstacles are almost never the binding pull —
+the M1/M5 pools already got there first, which is a finding in its own right and the
+subject of FINDINGS 41.
+
 **What this does not do:** it does not make the strategy profitable, and it is not
 evidence of an edge. Widening the read gives the scorer better information; whether
 better information produces positive expectancy after costs is an empirical question
