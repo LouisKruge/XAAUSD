@@ -8,8 +8,8 @@ layer with its own structure model, its own score, its own risk tier and its own
 validation record, sharing the analysis, risk and execution machinery that already
 exists.
 
-**Operating shape (§D):** no daily trade-count cap, up to 10 concurrent positions at
-0.15% risk each, wins targeting 0.10–0.25% of capital. The 2% global open-risk budget,
+**Operating shape (§D):** all hours the market is open, no daily trade-count cap, up to
+10 concurrent positions at 0.15% risk each, wins targeting 0.10–0.25% of capital. The 2% global open-risk budget,
 the 2% daily drawdown lockout and the martingale prohibitions are unchanged — they are
 what make that shape survivable. The count cap is removed only because the limit moves
 to something stricter: every trade must clear its own transaction costs.
@@ -86,7 +86,7 @@ The A/A+ engine keeps all of these as hard vetoes. The scalp engine scores them 
 | `premium_discount` | hard veto | hard for reversal setups, soft for continuation | A continuation entry in premium is the setup, not a violation |
 | `min_rr ≥ 2.0` | **unchanged** | replaced by net-expectancy gate | See §A.5 — this is the central change |
 | M15 MSS | required | replaced by micro-MSS on M1/M5 | Same algorithm, different configuration |
-| `session` | LONDON/NY/OVERLAP | per-setup, validated | Some setups may earn Asian-session eligibility; most will not |
+| `session` | LONDON/NY/OVERLAP | **removed as a gate** | Replaced by the cost gate — see §C.2. The clock was only ever a proxy for the spread |
 
 ### A.5 The central architectural change
 
@@ -270,6 +270,75 @@ Four distinct scales, explicitly named so nothing conflates them:
 a tighter configuration (`swing_lookback` 1, lower displacement thresholds). This is
 deliberate: a second implementation of BOS/CHOCH/MSS would be a second thing to keep
 correct, and the parity test only guards one.
+
+---
+
+## C.2 All-hours operation
+
+The scalp engine evaluates **every hour the market is open**. The session whitelist is
+removed for this engine (the A/A+ engine keeps its own unchanged).
+
+### C.2.1 One factual correction
+
+Gold is **24/5, not 24/7**. The market closes Friday ~22:00 GMT and reopens Sunday
+~22:00 GMT. The existing `block_first_minutes_of_week` / `block_last_minutes_of_week`
+settings stay: the first hour after the weekend gap and the last two before it are the
+thinnest, widest-spread moments of the week. "24/7" in practice means **~120 hours a
+week, not 168.**
+
+### C.2.2 The clock was only ever a proxy for the spread
+
+The session gate rejected ~42% of instants on a rule about time. What actually matters
+is what a trade costs at that moment. Measured against a $2.00 stop:
+
+| Window | Spread | Slippage | Cost | Cost as % of 1R | Break-even win rate @1:1.5 |
+|---|---|---|---|---|---|
+| London/NY overlap | 20 pts | 10 | $0.37 | 19% | 47.4% |
+| London or NY | 25 pts | 15 | $0.47 | 24% | 49.4% |
+| NY afternoon | 35 pts | 15 | $0.57 | 29% | 51.4% |
+| Pre-London 04–07 GMT | 40 pts | 20 | $0.67 | 34% | 53.4% |
+| Asian session | 45 pts | 20 | $0.72 | 36% | 54.4% |
+| **Broker rollover ~22 GMT** | 200 pts | 50 | $2.57 | **128%** | **dead** |
+| **Post-news spike** | 150 pts | 60 | $2.17 | **108%** | **dead** |
+
+Asian-session trading is not forbidden by this table — it is *more expensive*, needing
+a 54.4% win rate where the overlap needs 47.4%. That is a judgement the net-expectancy
+gate can make per bar, from the live spread, far better than a static whitelist can make
+it in advance.
+
+The rollover and post-news rows are where the whitelist was genuinely earning its keep,
+and the cost gate refuses them automatically and for the right reason: cost exceeds 1R,
+so no win rate recovers the trade.
+
+### C.2.3 Widen the stop instead of banning the hour
+
+The constructive version. Rather than refuse a window, require a stop wide enough that
+its cost stays proportionate:
+
+| Window | Cost | Minimum stop for cost ≤20% of 1R |
+|---|---|---|
+| London/NY overlap | $0.37 | 185 pts |
+| London or NY | $0.47 | 235 pts |
+| NY afternoon | $0.57 | 285 pts |
+| Pre-London | $0.67 | 335 pts |
+| Asian session | $0.72 | **360 pts** |
+| Rollover | $2.57 | 1,285 pts — no structural stop is that wide |
+
+So the Asian session is tradable with a $3.60 stop where London needs $2.35. That is a
+setup-selection consequence, not a ban: a sweep with a tight invalidation fails the cost
+gate at 03:00 and passes it at 09:00, and the engine simply waits. **The rule stops being
+"what time is it" and becomes "does this specific trade clear its own costs right now".**
+
+### C.2.4 What this changes in the gates
+
+- `g_session` is not evaluated for scalp candidates (unchanged for A/A+)
+- `g_spread` stays, and stays hard — an absolute ceiling
+- `g_net_expectancy` (§A.5) becomes the binding filter, using the live spread
+- Per-setup session eligibility remains available in config, defaulting to *all*, so
+  validation can disable a setup in a window where it demonstrably fails
+- **Session performance is still tracked and reported** (§E.4). Removing the gate does
+  not remove the measurement; if the Asian session turns out to be unprofitable per
+  setup, validation will disable it there with evidence rather than by assumption
 
 ---
 
@@ -487,7 +556,7 @@ A setup is promoted from `DEV` only when **all** hold:
 1. Out-of-sample net expectancy > 0 at pessimistic costs
 2. Walk-forward: net-positive in ≥70% of windows, no window worse than −6R
 3. Monte Carlo: 5th-percentile terminal equity above starting equity; risk of ruin < 1%.
-   **Resampling must preserve the correlation structure** — see §E.7
+   **Resampling must preserve the correlation structure** — see §E.8
 4. Profit factor ≥ 1.3 net, out-of-sample
 5. Return/max-drawdown ≥ 2.0
 6. ≥200 out-of-sample trades (otherwise the win-rate confidence interval is too wide to
@@ -498,12 +567,61 @@ A setup is promoted from `DEV` only when **all** hold:
    threshold (proposed 10% of trading days). §D.3 shows this is the failure mode that
    concurrency introduces, so it is measured directly rather than inferred
 
-Win rate is **recorded and reported at every stage but is not itself an acceptance
-criterion.** 70% remains the stated aspiration; a setup at 62% with strong net
-expectancy and a stable walk-forward passes, and one at 74% with negative net
-expectancy after costs fails. That ordering is deliberate and follows §30 of the brief.
+9. **Win rate: the Wilson 95% lower bound on out-of-sample trades must be ≥65%** — see
+   §E.7 for why the bound rather than the point estimate, and why this criterion is
+   dangerous alone
 
-### E.7 Correlation-aware resampling
+### E.7 The 65% requirement, and the trap inside it
+
+A 65% win rate is now a hard acceptance criterion. Two things have to be true about how
+it is applied, or it does more harm than the requirement is worth.
+
+**First: observing 65% never demonstrates 65%.** The Wilson 95% lower bound on an
+observed rate:
+
+| Observed | n=100 | n=200 | n=500 | n=1000 | n=2000 |
+|---|---|---|---|---|---|
+| 65% | 55.3% | 58.2% | 60.7% | 62.0% | 62.9% |
+| 68% | 58.3% | 61.2% | 63.8% | **65.0%** | **65.9%** |
+| 70% | 60.4% | 63.3% | **65.8%** | **67.1%** | **68.0%** |
+| 72% | 62.5% | **65.4%** | **67.9%** | **69.1%** | **70.0%** |
+
+An observed 65% never clears a 65% bound at any sample size — half the time the truth is
+worse. To *demonstrate* 65% a setup must observe roughly **68% over 1,000 out-of-sample
+trades, or 72% over 200.** That is the criterion: the bound, not the point estimate.
+
+**Second, and more important: a win-rate requirement is easiest to satisfy by destroying
+the strategy.** Break-even win rate falls as the target shrinks, so the cheapest way to
+hit any win-rate number is to take profit earlier:
+
+| Gross RR | Net RR | Break-even win rate | Edge at 65% win |
+|---|---|---|---|
+| 1:0.5 | 0.21 | 82.3% | **−0.211R** |
+| 1:0.75 | 0.42 | 70.6% | **−0.079R** |
+| 1:1 | 0.62 | 61.8% | +0.053R |
+| 1:1.25 | 0.82 | 54.9% | +0.184R |
+| 1:1.5 | 1.02 | 49.4% | +0.316R |
+| 1:2 | 1.43 | 41.2% | +0.579R |
+
+**A 65% win rate at a 1:0.5 gross target is a losing system** — it bleeds 0.21R per
+trade. The same 65% at 1:1.5 earns 0.316R. An optimiser told to maximise win rate walks
+straight down that column, and every step it takes looks like success while destroying
+expectancy. This is exactly the failure §5 of the original brief warned about, and the
+warning applies with more force now that the number is a requirement.
+
+So the win-rate criterion is never applied alone. A setup ships only when it clears the
+bound **and** carries positive net expectancy at pessimistic costs **and** meets a
+minimum gross target of **1:1.25** — the point below which 65% stops being worth having.
+The RR sweep (§E.3) still searches 1:1 through 1:2, but a configuration that reaches 65%
+by shrinking below 1:1.25 is rejected on expectancy regardless of its win rate.
+
+**A statement I cannot make:** that any setup *will* achieve 65%. Nothing in this system
+has taken a trade, so the win rate is unmeasured. What §E does is refuse to deploy
+anything that has not demonstrated it. If no setup clears the bound, the honest outcome
+is that none ships — and the answer to "make it 65%" is that the requirement is now
+enforced, not that the number is now guaranteed.
+
+### E.8 Correlation-aware resampling
 
 Standard Monte Carlo shuffles trades independently. That is wrong here and would
 flatter the result: §D.3 shows independent trades never hit the daily lockout while
@@ -524,7 +642,7 @@ Three changes:
 The correlation gate's job is to move the *realised* ρ down. §E measures what it
 actually achieves rather than assuming it works.
 
-### E.8 Deployment gate
+### E.9 Deployment gate
 
 The existing Phase 10 gate is extended, not bypassed. `LIVE_TRADING` stays `false`; each
 scalp setup carries its own `ValidationStatus`; live routing requires `OOS_PASSED` per
@@ -565,14 +683,16 @@ existing engine measurable, and stage 2's cost model improves the A/A+ engine to
 | Win size | 0.10–0.25% of capital, achieved by the risk dial rather than by target inflation | §D.2 |
 | Global 2% open-risk cap | **Unchanged** | §D |
 | 2% daily drawdown lockout | **Unchanged** | §D |
+| Trading hours | **All hours the market is open** (24/5, not 24/7). Session gate removed for scalps; the cost gate replaces it | §C.2 |
+| Win rate | **≥65% Wilson lower bound**, out-of-sample — paired with positive net expectancy and a 1:1.25 minimum gross target so it cannot be met by shrinking targets | §E.7 |
 
 ### F.2 Still open
 
 1. **Holding-time expectation.** The arithmetic says 10–90 minutes, not seconds. If the
    intent was true tick-scalping, the spread makes that impossible on this instrument
    and the plan should be reconsidered rather than built.
-2. **Session scope.** Whether to test Asian-session eligibility at all, given spreads are
-   typically widest there and §A.6 shows how punishing that is.
+2. ~~Session scope.~~ **Decided:** all hours, with the cost gate deciding per bar rather
+   than the clock deciding in advance (§C.2).
 3. **0.25% wins at 10 concurrent.** Only reachable at a 1:2 gross target, which pulls
    against smaller targets. The alternative is 8 concurrent at 0.25%. Either is inside
    the cap; the choice is the operator's.
