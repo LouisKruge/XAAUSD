@@ -8,6 +8,12 @@ layer with its own structure model, its own score, its own risk tier and its own
 validation record, sharing the analysis, risk and execution machinery that already
 exists.
 
+**Operating shape (§D):** no daily trade-count cap, up to 10 concurrent positions at
+0.15% risk each, wins targeting 0.10–0.25% of capital. The 2% global open-risk budget,
+the 2% daily drawdown lockout and the martingale prohibitions are unchanged — they are
+what make that shape survivable. The count cap is removed only because the limit moves
+to something stricter: every trade must clear its own transaction costs.
+
 ---
 
 ## A. Current bot diagnostic — why trade frequency is low
@@ -60,7 +66,14 @@ Non-negotiable. These are safety, not selectivity:
 `news_blackout` · `stop_validity` · `strategy_validated` · `no_duplicate` ·
 `market_regime = ABNORMAL` (never tradable)
 
-Plus one new hard gate, scalp-only: **net expectancy after costs** (§A.5).
+Plus three new hard gates:
+
+- **net expectancy after costs** (§A.5) — scalp-only; the control that replaces the
+  removed daily trade-count cap
+- **correlation budget** (§D.3) — both engines; what makes ten concurrent positions ten
+  bets rather than one leveraged bet
+- **daily cost budget** (§D.4) — scalp-only; stops the day when accumulated friction
+  outruns net progress
 
 ### A.4 Which filters should become SOFT — for the scalp layer only
 
@@ -195,7 +208,8 @@ remains the single source of truth.
 | `strategy/scalp_score.py` | `ScalpScorer`, 0–100, weights in config, validated statistically |
 | `strategy/scalp_gates.py` | `SCALP_HARD_GATES` incl. `g_net_expectancy`, `g_cost_ratio`, `g_micro_volatility` |
 | `risk/cost_model.py` | Spread percentile, commission, modelled slippage → expected cost in price and in R |
-| `risk/correlation.py` | Same-direction, same-zone, same-pool, aggregate-open-risk exposure |
+| `risk/correlation.py` | Same-direction, same-zone, same-pool, same-setup-burst and aggregate exposure. **Load-bearing** — concurrency above 1 is gated on it (§D.3) |
+| `risk/cost_budget.py` | Running daily friction total; halts the scalp tier when costs outrun net progress |
 | `backtesting/holding_time.py` | Holding-time analytics and time-stop policy comparison |
 | `backtesting/rr_sweep.py` | The 1:1 … 1:2 target sweep across setups, sessions and regimes |
 | `dashboard/scalp.py` + panel | Scalp section and compounding simulator |
@@ -261,69 +275,163 @@ correct, and the parity test only guards one.
 
 ## D. Risk model
 
+Revised after the concurrency decision: **no daily trade-count cap, up to 10 concurrent
+scalps, wins targeting 0.10–0.25% of capital.** The three caps that make that survivable
+— the 2% global open-risk budget, the 2% daily drawdown lockout, and the martingale
+prohibitions — are unchanged. Removing the count cap is only safe because the limit
+moves somewhere stricter, not because it disappears.
+
 ### D.1 Tiering
 
 | Tier | Risk per trade | Source |
 |---|---|---|
 | A+ | up to 2.00% | existing `risk_pct_a_plus` |
 | A | 1.00% | existing `risk_pct_a` |
-| **SCALP** | **0.25%–0.50%** | new `risk_pct_scalp`, default 0.25% |
+| **SCALP** | **0.15% (recommended default), configurable 0.10–0.25%** | new `risk_pct_scalp` |
 
 `RiskGate.approved_risk_pct` already keys off `Classification`; adding `SCALP` to that
-map is a three-line change and inherits every existing cap.
+map inherits every existing cap.
 
-### D.2 Interaction — the global cap is unchanged and shared
+### D.2 Why 0.15% is the recommended default
 
-`max_total_open_risk_pct = 2.0%` remains a single budget across **both** engines. The
-scalp engine spends from the same pot:
+Concurrency and per-trade risk are the same dial, bounded by the unchanged 2% budget:
 
-```
-one A+ position at 2.0%      → no scalp capacity remains
-one A position at 1.0%       → up to 4 scalps at 0.25%
-no A/A+ position             → up to 8 scalps at 0.25%
-```
+| Concurrent | @0.15% | @0.20% | @0.25% |
+|---|---|---|---|
+| 8 | 1.20% | 1.60% | 2.00% |
+| **10** | **1.50%** | **2.00%** (at the cap) | 2.50% **breach** |
+| 12 | 1.80% | 2.40% **breach** | 3.00% **breach** |
 
-Concurrency limits become per-tier rather than global:
-`max_concurrent_positions` (currently 1) splits into `max_concurrent_swing = 1` and
-`max_concurrent_scalp` (proposed 3, validated). The **aggregate** open-risk cap is what
-actually binds, and it does not move.
+So: *10 concurrent at 0.20%*, or *8 at 0.25%*, or *10 at 0.15%* — never 10 at 0.25%.
 
-### D.3 Frequency limits
+The deciding argument is what a full losing cluster does:
 
-Replace the single `max_trades_per_day = 3` with a per-tier ladder, all configurable and
-all validated rather than assumed:
+| Risk each | 10 stop out together | Consequence |
+|---|---|---|
+| 0.15% | −1.50% | headroom left; the day continues |
+| 0.20% | −2.00% | **instantly trips the daily lockout** |
 
-```
-scalp:  max_per_hour, max_per_session, max_per_day, max_concurrent
-swing:  max_trades_per_day = 3        (unchanged)
-```
+At 0.20% a single bad cluster ends the trading day by construction. 0.15% keeps ten
+positions open, lands wins at **0.153% of capital** — inside the requested 0.10–0.25%
+band — and leaves the daily limit as a genuine backstop rather than a tripwire the
+normal operating mode walks into.
 
-Defaults proposed for testing, not for deployment: 3/hour, 6/session, 12/day, 3
-concurrent. Whether any of these improves expectancy is an empirical question — §E
-tests the caps themselves, since a cap that binds during the best hour of the day is a
-cost, not a control.
+Win size follows directly from risk at net RR 1.02 (a 1:1.5 gross target on a 200-point
+stop, after costs):
 
-### D.4 Correlation control
+| Risk | Typical win |
+|---|---|
+| 0.10% | 0.102% of capital |
+| **0.15%** | **0.153%** |
+| 0.20% | 0.204% |
+| 0.25% | 0.255% |
 
-A new hard gate for both engines. Three scalps long off the same pool is one position
-with three commissions:
+A 0.25% win at 10 concurrent is only reachable by raising the gross target to 1:2, which
+pulls against the smaller-targets objective. Reaching it with a small target means 8
+concurrent, not 10. That trade-off is the operator's to make; both are configurable and
+both are inside the cap.
 
-- **same direction**: aggregate same-direction risk ≤ configured share of the global cap
-- **same zone**: reject a second entry whose stop sits within *k* × ATR of an open one
-- **same pool**: reject a second trade premised on the same liquidity pool
-- **strategy correlation**: measured from backtest returns; highly correlated setups
-  share a sub-budget
+### D.3 Correlation is the binding constraint, not the trade count
 
-### D.5 Compounding
+Ten XAUUSD positions are not ten bets. They are **one bet on gold, sized ten times.**
+Monte Carlo over 200,000 clusters of 10 positions at 0.15–0.20% each, varying how alike
+the signals are, reporting the probability that one cluster exhausts the entire 2% daily
+loss limit:
+
+| Signal correlation | 55% win rate | 65% | 75% |
+|---|---|---|---|
+| Independent (ρ = 0) | 0% | 0% | 0% |
+| Realistic (ρ = 0.7) | **14.0%** | 8.4% | 4.5% |
+| Same signal, same direction (ρ = 0.95) | **31.8%** | 23.1% | 14.9% |
+
+The mean cluster return is positive in every row — this is not a claim that clusters
+lose. It is that the variance is concentrated: at ρ = 0.7 the daily lockout fires
+roughly **one day in seven**; at ρ = 0.95, one day in three. "Ten open constantly"
+is self-limiting unless the ten are genuinely different trades.
+
+**Therefore the correlation gate is load-bearing, not a refinement.** It is what converts
+ten positions from one leveraged bet into ten bets, and it is a hard gate for both
+engines:
+
+- **Same direction** — aggregate same-direction scalp risk capped at a configured share
+  of the global budget (proposed: 60%, so at most 6 of 10 face the same way)
+- **Same zone** — reject a second entry whose stop sits within *k* × ATR of an open one
+- **Same pool** — reject a second trade premised on the same liquidity pool
+- **Same setup burst** — reject a second entry from the same setup within a configured
+  window unless the premise differs
+- **Strategy correlation** — measured from backtest returns; correlated setups share a
+  sub-budget rather than each getting a full one
+
+**Hard sequencing rule:** `max_concurrent_scalp` stays at **1** until the correlation
+gate exists and is tested. Raising concurrency first would produce exactly the ρ = 0.95
+row above.
+
+### D.4 Frequency: the count cap is removed, the limit moves
+
+`max_trades_per_day` no longer applies to the scalp tier. Per §10 of the brief, an
+arbitrary count was never the right control. What replaces it — all binding
+simultaneously:
+
+| Control | Purpose |
+|---|---|
+| **Net-expectancy gate** (§A.5) | Every trade must clear its own costs. This is what makes unbounded frequency safe |
+| Global open risk ≤ 2.0% | Unchanged. Caps concurrency automatically |
+| `max_concurrent_scalp` = 10 | Explicit, and gated on D.3 |
+| Correlation budgets | Prevents ten copies of one trade |
+| Daily drawdown lockout 2% | Unchanged |
+| **Daily cost budget** *(new)* | Stops the day when accumulated friction exceeds a set share of capital without net progress |
+| `max_per_hour` / `max_per_session` | Retained as configurable safety valves, default **unlimited** |
+
+### D.5 Why the count cap can go — and what would make that wrong
+
+Each trade pays roughly 0.24R in costs at a 200-point stop. At 0.15% risk that is
+**0.036% of capital per trade, win or lose**:
+
+| Trades/day | Cost drag/day | Per 20-day month |
+|---|---|---|
+| 10 | 0.36% | 7.2% |
+| 30 | 1.08% | 21.6% |
+| 60 | 2.16% | 43.2% |
+| 100 | 3.60% | 72.0% |
+
+Frequency multiplies the edge and the friction **equally**. There is no advantage in the
+count itself; a higher count is only better if each additional trade carries positive
+net expectancy. The failure mode to guard against is not "too many trades" but "the
+marginal trade's gross edge decays toward zero while its 0.24R cost does not" — which is
+what the net-expectancy gate and the daily cost budget exist to catch.
+
+### D.6 What follows *if* an edge exists
+
+At 0.15% risk, 30 trades/day, net RR 1.02:
+
+| Win rate | Edge/trade | Daily | Compounded over 20 days |
+|---|---|---|---|
+| 45% | −0.091R | −0.41% | −7.9% |
+| 50% | +0.010R | +0.05% | +0.9% |
+| 55% | +0.111R | +0.50% | +10.5% |
+| 60% | +0.212R | +0.95% | +20.9% |
+| 65% | +0.313R | +1.41% | +32.3% |
+| 70% | +0.414R | +1.86% | +44.7% |
+
+**This table is a consequence, not a forecast.** It states what would follow from a given
+net win rate; it is not evidence that any setup achieves one. Whether these setups clear
+55–65% *after costs, out-of-sample* is precisely the question §E exists to answer, and
+the honest prior is that most will not. Note also how narrow the margin is: 50% is
+indistinguishable from noise and 45% compounds downward at the same speed 55% compounds
+up. At this frequency the system is a machine for expressing whatever edge exists,
+amplified — in both directions.
+
+### D.7 Compounding
 
 Sizing already derives from live equity via `AccountState`, so compounding works today
-and needs no change. The invariant to encode as a test: **the risk *percentage* is
-constant and never a function of recent results.** The existing prohibitions
-(martingale, averaging down, increasing risk after losses, stop-widening) apply
-identically to the scalp tier, and each gets a test asserting it is *impossible*, per
-the project's testing convention.
+and needs no change. The invariant to encode as a test: **the risk percentage is
+constant and never a function of recent results.** An account that doubles trades
+0.15% of the larger balance; an account in drawdown trades 0.15% of the smaller one.
 
----
+Martingale, grid, averaging down, increasing risk after losses, revenge trading and
+stop-widening remain prohibited for the scalp tier exactly as for A/A+. Each gets a test
+asserting it is *impossible*, per the project's testing convention — the higher trade
+count makes these more dangerous, not less.
 
 ## E. Backtest plan — how each setup is proved or discarded
 
@@ -378,19 +486,45 @@ A setup is promoted from `DEV` only when **all** hold:
 
 1. Out-of-sample net expectancy > 0 at pessimistic costs
 2. Walk-forward: net-positive in ≥70% of windows, no window worse than −6R
-3. Monte Carlo: 5th-percentile terminal equity above starting equity; risk of ruin < 1%
+3. Monte Carlo: 5th-percentile terminal equity above starting equity; risk of ruin < 1%.
+   **Resampling must preserve the correlation structure** — see §E.7
 4. Profit factor ≥ 1.3 net, out-of-sample
 5. Return/max-drawdown ≥ 2.0
 6. ≥200 out-of-sample trades (otherwise the win-rate confidence interval is too wide to
    act on — the existing Wilson interval is already computed and is the check)
 7. Median holding time within the setup's declared window
+8. **Cluster drawdown**: with the correlation gate active and concurrency at 10, the
+   observed frequency of days hitting the 2% lockout must be below a configured
+   threshold (proposed 10% of trading days). §D.3 shows this is the failure mode that
+   concurrency introduces, so it is measured directly rather than inferred
 
 Win rate is **recorded and reported at every stage but is not itself an acceptance
 criterion.** 70% remains the stated aspiration; a setup at 62% with strong net
 expectancy and a stable walk-forward passes, and one at 74% with negative net
 expectancy after costs fails. That ordering is deliberate and follows §30 of the brief.
 
-### E.7 Deployment gate
+### E.7 Correlation-aware resampling
+
+Standard Monte Carlo shuffles trades independently. That is wrong here and would
+flatter the result: §D.3 shows independent trades never hit the daily lockout while
+realistically correlated ones do so on 14% of days. Independent resampling would
+therefore report a risk of ruin near zero for a system whose actual failure mode it had
+resampled away.
+
+Three changes:
+
+1. **Resample clusters, not trades.** The unit is a set of positions open at the same
+   time, kept intact.
+2. **Sweep the correlation assumption** at ρ = 0, 0.7 and 0.95 and report all three.
+   Ship on the ρ = 0.95 column, the same way the cost sweep ships on the pessimistic
+   column.
+3. **Block-bootstrap by day** so intraday clustering and same-session regime persistence
+   survive the resampling.
+
+The correlation gate's job is to move the *realised* ρ down. §E measures what it
+actually achieves rather than assuming it works.
+
+### E.8 Deployment gate
 
 The existing Phase 10 gate is extended, not bypassed. `LIVE_TRADING` stays `false`; each
 scalp setup carries its own `ValidationStatus`; live routing requires `OOS_PASSED` per
@@ -412,8 +546,8 @@ Nothing after stage 1 is written before stage 1's numbers exist.
 | **3** | Time-based metrics in `backtesting/metrics.py` | Holding time, profit/hour, expectancy/hour computed and tested against hand-worked fixtures |
 | **4** | `MicroStructureConfig` + M1 in the analyzer + `MicroSnapshot` | Micro BOS/CHOCH/MSS detected on real M1; MarketView boundary test still passes |
 | **5** | Setups S1–S3 behind an `enabled_scalp_strategies` switch, default **off** | Each emits candidates on real data; per-setup funnel measured |
-| **6** | `ScalpScorer` + `Classification.SCALP` + scalp risk tier | Risk map extended; every existing risk test still passes |
-| **7** | `risk/correlation.py` + per-tier frequency ladder | Same-zone and same-pool duplicates provably impossible |
+| **6** | `ScalpScorer` + `Classification.SCALP` + scalp risk tier at 0.15%, `max_concurrent_scalp` pinned to 1 | Risk map extended; every existing risk test still passes; open-risk cap provably still binding |
+| **7** | `risk/correlation.py` + daily cost budget + per-tier frequency ladder | Same-zone, same-pool and same-burst duplicates provably impossible; **only now may `max_concurrent_scalp` rise above 1** |
 | **8** | RR sweep + walk-forward + Monte Carlo across S1–S3 | The real strategy-regime matrix is generated and written to config |
 | **9** | Setups S4–S6, same treatment | Promoted only on their own merits |
 | **10** | Dashboard scalp panel + compounding simulator | Live signals, per-setup stats, simulator clearly labelled a simulation |
@@ -421,12 +555,24 @@ Nothing after stage 1 is written before stage 1's numbers exist.
 Stages 0–3 are worth doing regardless of whether the scalp engine ships: they make the
 existing engine measurable, and stage 2's cost model improves the A/A+ engine too.
 
-### F.1 What I recommend deciding before stage 2
+### F.1 Decisions taken
+
+| Question | Decision | Where |
+|---|---|---|
+| Daily trade-count cap | **Removed** for the scalp tier; replaced by the net-expectancy gate, the open-risk cap and the daily cost budget | §D.4 |
+| `max_concurrent_scalp` | **10**, pinned to 1 until the correlation gate ships | §D.2, §D.3 |
+| `risk_pct_scalp` | **0.15%** default (0.10–0.25% configurable) — 10 open = 1.50%, wins ≈ 0.153% | §D.2 |
+| Win size | 0.10–0.25% of capital, achieved by the risk dial rather than by target inflation | §D.2 |
+| Global 2% open-risk cap | **Unchanged** | §D |
+| 2% daily drawdown lockout | **Unchanged** | §D |
+
+### F.2 Still open
 
 1. **Holding-time expectation.** The arithmetic says 10–90 minutes, not seconds. If the
    intent was true tick-scalping, the spread makes that impossible on this instrument
    and the plan should be reconsidered rather than built.
-2. **`max_concurrent_scalp`.** Proposed 3. This is the single largest driver of both
-   frequency and correlated exposure.
-3. **Session scope.** Whether to test Asian-session eligibility at all, given spreads are
-   typically widest and §A.6 shows how punishing that is.
+2. **Session scope.** Whether to test Asian-session eligibility at all, given spreads are
+   typically widest there and §A.6 shows how punishing that is.
+3. **0.25% wins at 10 concurrent.** Only reachable at a 1:2 gross target, which pulls
+   against smaller targets. The alternative is 8 concurrent at 0.25%. Either is inside
+   the cap; the choice is the operator's.
