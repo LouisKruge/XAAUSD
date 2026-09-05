@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import argparse
 import itertools
-import logging
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -29,6 +29,7 @@ from xauusd.backtesting.engine import BacktestConfig, BacktestEngine
 from xauusd.config.settings import load_settings
 from xauusd.domain.enums import Timeframe
 from xauusd.domain.types import SymbolSpec
+from xauusd.monitoring.logging import configure_logging
 
 MODELS = [
     "scalp_sweep_reversal",
@@ -54,7 +55,14 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    logging.disable(logging.CRITICAL)
+    # `logging.disable(logging.CRITICAL)` was here and did NOTHING. structlog is only
+    # pointed at stdlib inside `configure_logging`; a script that never calls it gets
+    # structlog's default PrintLogger, which writes straight to stdout and never
+    # consults stdlib levels. So every decision instant emitted several DEBUG lines —
+    # millions of them across a full grid. That is not just noise: it buried the result
+    # rows this script prints as it goes, so a running sweep looked like a hung one, and
+    # the I/O itself is a measurable share of the runtime.
+    configure_logging("ERROR", json_output=False)
     settings = load_settings()
 
     # Reuse the CLI loader so the sweep reads history exactly as a backtest does,
@@ -95,14 +103,32 @@ def main() -> int:
 
     scores = [float(x) for x in args.scores.split(",")]
     rrs = [float(x) for x in args.rrs.split(",")]
+    configs = list(itertools.product(scores, rrs))
+
+    # Every configuration re-walks the whole history, so the grid multiplies directly
+    # into wall-clock time. Saying so up front is the difference between "this is taking
+    # hours" and "this has hung" — and only one of those is worth killing.
+    base_tf = Timeframe.M1 if n_m1 >= 20_000 else Timeframe.M5
+    instants = max(0, (len(data[base_tf]) - args.warmup)) // max(args.step, 1)
+    print(
+        f"\nplan             : {len(configs)} configurations x ~{instants:,} decision "
+        f"instants each\n"
+        f"                   at roughly 10-15 instants/second this is on the order of "
+        f"{len(configs) * instants / 12 / 3600:.1f} hours.\n"
+        f"                   Narrow it with --scores/--rrs, or sample less densely with "
+        f"a larger --step.\n"
+        f"                   Rows print as each configuration finishes; nothing is lost "
+        f"if you stop early."
+    )
 
     print(
         f"\n{'score':>6} {'RR':>5} {'trades':>7} {'win%':>6} {'expR':>8} "
-        f"{'PF':>6} {'maxDD':>7} {'totalR':>8}"
+        f"{'PF':>6} {'maxDD':>7} {'totalR':>8}  progress"
     )
     rows = []
     candidates: list[tuple[float, float, int, float]] = []
-    for score, rr in itertools.product(scores, rrs):
+    started = time.monotonic()
+    for done, (score, rr) in enumerate(configs, start=1):
         tuned = settings.model_copy(
             update={
                 "scalp": settings.scalp.model_copy(
@@ -129,10 +155,13 @@ def main() -> int:
         m = result.metrics
         scalps = [t for t in result.trades if str(getattr(t, "strategy", "")).startswith("scalp")]
         candidates.append((score, rr, len(result.scalp_scores), max(result.scalp_scores or [0.0])))
+        elapsed = time.monotonic() - started
+        remaining = elapsed / done * (len(configs) - done)
         print(
             f"{score:>6.0f} {rr:>5.2f} {len(scalps):>7} {m.win_rate * 100:>5.1f}% "
             f"{m.expectancy_r:>+8.3f} {m.profit_factor:>6.2f} "
-            f"{m.max_drawdown_pct * 100:>6.2f}% {m.total_r:>+8.2f}",
+            f"{m.max_drawdown_pct * 100:>6.2f}% {m.total_r:>+8.2f}"
+            f"  {done}/{len(configs)}, ~{remaining / 60:.0f} min left",
             flush=True,
         )
         rows.append((score, rr, len(scalps), m.win_rate, m.expectancy_r, m.total_r))
