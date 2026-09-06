@@ -376,6 +376,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         asyncio.run(engine.run())
     except KeyboardInterrupt:
         engine.stop()
+        return 0
+    # An engine that lost a loop has not shut down cleanly, and returning 0 told every
+    # supervisor, shortcut and log reader that it had. Report the failure.
+    if engine.crashed_loops:
+        print("ENGINE STOPPED AFTER A LOOP CRASHED:")
+        for name, exc in engine.crashed_loops:
+            print(f"  {name}: {type(exc).__name__}: {exc}")
+        return 1
     return 0
 
 

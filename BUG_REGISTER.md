@@ -1,0 +1,253 @@
+# BUG REGISTER
+
+Opened 2026-09-06 under the Master Engineering Directive. Every entry below comes from
+reading the code or running it, never from inference about what code of this shape
+usually does. Where I could not verify something in this environment it says so, in the
+entry, rather than being quietly counted as passing.
+
+## Environment limits on verification — read this first
+
+This audit runs in a **Linux container with no MetaTrader 5, no broker connection, and
+no harvested price history**. MT5 is Windows-only and the bridge talks to a terminal on
+the operator's machine. So:
+
+| Directive item | Status here |
+|---|---|
+| §8 MT5 connection manager | Code audited; **live connection NOT VERIFIABLE HERE** |
+| §9 order verification against a real terminal | Logic audited + simulated; **real MT5 NOT VERIFIABLE HERE** |
+| §12 R300 viability against a real broker spec | Arithmetic tested; **real spec NOT VERIFIABLE HERE** |
+| §26 live gate | Code audited; **cannot be exercised without a broker** |
+| §31 dashboard against live data | Data paths audited; **live values NOT VERIFIABLE HERE** |
+| §39 profitability on real history | **NOT POSSIBLE HERE** — the database is on the operator's machine |
+
+Everything else is run, not assumed.
+
+## Baseline before any change
+
+```
+unit         575 passed
+integration  105 passed
+ruff         clean      ruff format clean      mypy clean (risk, execution, domain)
+```
+
+A green suite is the starting point, not evidence of correctness: every bug below was
+present while all 680 tests passed. That is the point of the audit.
+
+---
+
+## CRITICAL — prevents trading or creates unsafe trading
+
+### BUG-001 — A broker pricing failure silently disables the sizing cross-check
+
+| | |
+|---|---|
+| **File** | `src/xauusd/engine/pipeline.py:172-178`, consumed at `src/xauusd/risk/position_sizing.py:158` |
+| **Function** | `DecisionPipeline._broker_loss_for_one_lot` → `PositionSizer.size` |
+| **Severity** | CRITICAL |
+| **Status** | FIXED |
+
+**Description.** The sizer cross-checks our loss-per-lot against the broker's own
+`OrderCalcProfit`. If they disagree by more than the tolerance it refuses the trade —
+"refusing to trade on a specification we cannot verify". That is the guard against
+sizing on a misread contract spec, which is the single most expensive arithmetic error
+this system can make.
+
+The value reaching it comes from:
+
+```python
+try:
+    value = state.calc_profit(plan.direction, plan.entry, plan.stop_loss)
+    return float(value) if value is not None else None
+except Exception:
+    return None
+```
+
+and the consumer is `if broker_calc_profit is not None:`.
+
+**Root cause.** `None` is overloaded to mean two incompatible things: *"there is no
+broker to ask"* (correct in BACKTEST, where `SimBroker` has no `OrderCalcProfit`) and
+*"the broker was asked and failed"* (a live fault). The second silently skips the check
+and proceeds to trade on unverified arithmetic. Nothing is logged, so the trade's
+journal cannot show the check was skipped.
+
+**Dependencies.** `EngineState.calc_profit`, `RiskGate.evaluate`, `SizingResult`,
+`ScalpPipeline` (passes `broker_calc_profit=None` unconditionally — see BUG-002).
+
+**Fix.** Distinguish "not available" from "failed". Log the failure. In a real-money
+mode, a broker that cannot price a test tick is a reason to refuse, not to skip —
+degradation is one-directional everywhere else in this system and must be here.
+
+**Test required.** A live-mode sizing call whose `calc_profit` raises must not approve.
+A backtest-mode call with no `calc_profit` must still approve.
+
+---
+
+### BUG-002 — The scalp path never performs the broker sizing cross-check at all
+
+| | |
+|---|---|
+| **File** | `src/xauusd/engine/orchestrator.py` (scalp scan), `src/xauusd/engine/scalp_pipeline.py` |
+| **Function** | `TradingEngine._scalp_scan` → `ScalpPipeline.run(broker_calc_profit=None)` |
+| **Severity** | CRITICAL |
+| **Status** | FIXED |
+
+**Description.** The live scalp scan passes `broker_calc_profit=None` as a literal. The
+A/A+ path computes it from the broker. So the cross-check that refuses to size on an
+unverifiable specification protects A/A+ trades and not scalp trades — on the same
+account, through the same `RiskGate`, to the same broker.
+
+**Root cause.** Same class as FINDINGS 38 and 40: a rule with several enforcement
+points, and the newest path never learned it. This is the eleventh instance.
+
+**Fix.** Wire the broker's `calc_profit` into the scalp scan exactly as the A/A+ path
+does.
+
+**Test required.** A parity test asserting both paths receive a broker cross-check value
+when one is available.
+
+---
+
+## HIGH — breaks major functionality
+
+### BUG-003 — A dead engine loop is invisible and the process still exits successfully
+
+| | |
+|---|---|
+| **File** | `src/xauusd/engine/orchestrator.py:320-329` |
+| **Function** | `TradingEngine.run` |
+| **Severity** | HIGH |
+| **Status** | FIXED |
+
+**Description.**
+
+```python
+await asyncio.gather(
+    self._tick_loop(), self._decision_loop(), self.scalp_scanner.run(),
+    self._reconcile_loop(), self._context_loop(), self._command_loop(),
+    return_exceptions=True,
+)
+```
+
+The return value is discarded. `return_exceptions=True` collects each task's exception
+into that list instead of propagating it, so if a loop dies nothing raises, nothing is
+logged, and the remaining loops carry on. The engine keeps ticking and managing
+positions with, say, no decision loop — alive, and not trading. When the loops finally
+end, `run()` returns normally and `cmd_run` exits **0**, reporting success.
+
+**Mitigating fact, established by reading each loop:** every loop has an internal
+`except Exception` that logs and continues, so ordinary faults do not kill a loop. This
+is why it is HIGH and not CRITICAL. What escapes that guard is anything outside the
+`try` (`_reconcile_loop` and `_command_loop` both `await asyncio.sleep(interval)` before
+theirs) and any `BaseException` — `CancelledError`, `MemoryError`.
+
+**Fix.** Inspect the gathered results. Log any exception at CRITICAL with the task name,
+stop the engine rather than continue degraded, and exit non-zero. §37 requires exactly
+this.
+
+**Test required.** A loop that raises must produce a logged CRITICAL, stop the engine,
+and yield a non-zero exit.
+
+---
+
+### BUG-004 — A database failure silently disables live scalp routing with no explanation
+
+| | |
+|---|---|
+| **File** | `src/xauusd/engine/orchestrator.py:747-755` |
+| **Function** | `TradingEngine._strategy_status` |
+| **Severity** | HIGH |
+| **Status** | FIXED |
+
+**Description.** `except Exception: return {}`. An empty map means every model reads
+`DEV`, so `scalp_strategy_validated` refuses live routing. The **behaviour** is correct
+and safe. The **observability** is not: an operator sees a bot that has stopped taking
+scalps and no log line saying the strategy-status table could not be read. The safe
+outcome is indistinguishable from a market with no setups — the confusion this project
+has already paid for twice (FINDINGS 37, 41).
+
+**Fix.** Log the exception at ERROR and surface it in the health panel. Keep the
+fail-closed return.
+
+**Test required.** A failing session must log and still return an empty map.
+
+---
+
+## MEDIUM — incorrect behaviour, system continues
+
+### BUG-005 — `_worker_init` inherits a `SystemExit` path that breaks the pool
+
+| | |
+|---|---|
+| **File** | `scripts/scalp_sweep.py` → `src/xauusd/cli.py:539` |
+| **Severity** | MEDIUM |
+| **Status** | MITIGATED, root cause open |
+
+`_load_data` raises `SystemExit` when history is missing. In a pool worker that kills the
+process and surfaces as `BrokenProcessPool`. A serial fallback now catches it (commit
+`42d464a`), so a run completes, but the diagnosis reaching the operator is the pool
+error rather than "no history". Worth converting to a typed exception the worker can
+report cleanly.
+
+---
+
+## Verified NOT defective (checked, found correct)
+
+Recording these so the audit is not mistaken for a list of everything that is wrong.
+
+| Area | Evidence |
+|---|---|
+| §4 bare `except:` | `grep -c "except\s*:" src/` → **0** |
+| §5 mock data in live paths | Only 3 files match `mock/dummy/fake/placeholder`: `bootstrap.py`, `retcodes.py`, `symbol_discovery.py` — all string literals in messages or broker retcode names, none returning fabricated market data |
+| §28 retry safety | `OrderManager` classifies retcodes and routes ambiguous sends to `_reconcile` before retrying, which is the check-before-retry the directive demands |
+| §35 restart recovery | `reconciler.py` adopts orphaned broker positions on startup (`adopt_orphans`, `result.adopted`) |
+| §27 kill switch | Typed reasons, non-auto-clearable ones need `force=True` and a named human, tripping is idempotent and alerts |
+| News date parsing | `news_feed.py:44` `except: pass` is a legitimate format-fallback chain, not a swallow |
+
+---
+
+## Execution order
+
+CRITICAL → HIGH → MEDIUM → LOW, fixing root causes, re-running the full suite after
+each, and adding the test that would have caught it.
+
+1. BUG-002 (scalp cross-check absent) — smallest fix, largest safety gap
+2. BUG-001 (failure vs unavailable) — the semantic root of BUG-002's class
+3. BUG-003 (dead loop invisible)
+4. BUG-004 (silent DB failure)
+5. BUG-005 (typed exception for missing history)
+
+
+---
+
+## Round 1 outcome
+
+| Bug | Severity | Status | Test |
+|---|---|---|---|
+| BUG-001 broker failure vs unavailable | CRITICAL | **FIXED** | `test_broker_cross_check.py` (5), `test_trade_path.py` (+1 live case) |
+| BUG-002 scalp path had no cross-check | CRITICAL | **FIXED** | `test_broker_cross_check.py` (5) |
+| BUG-003 dead loop invisible, exit 0 | HIGH | **FIXED** | `test_engine_failure_visibility.py` (6) |
+| BUG-004 silent DB failure | HIGH | **FIXED** | `test_engine_failure_visibility.py` (2) |
+| BUG-005 SystemExit through a pool worker | MEDIUM | OPEN | — |
+
+**A regression I caused and repaired.** Making `_broker_loss_for_one_lot` an instance
+method — it needs `settings.mode` to tell a live failure from an absent broker — broke
+two existing integration tests that called it statically. They are updated rather than
+deleted, and the class gained the case whose absence let BUG-001 survive: a broker that
+fails *on real money* must refuse, not skip. The old tests asserted only the lenient
+half and were right about it; they were simply incomplete.
+
+**Proof the new tests catch the old bug**, rather than merely passing against the fix:
+
+```
+BEFORE fix (HEAD)        : calc_profit present=False -> TEST FAILS (bug present)
+AFTER fix (working tree) : calc_profit present=True  -> TEST PASSES
+```
+
+## Still to do
+
+- BUG-005: typed exception instead of `SystemExit` from `_load_data`
+- §41 final sweep (TODO/FIXME/HACK/`pass`/`print(`) with a judgement on each
+- §34 failure injection: MT5 disconnect, stale data, rejected order, duplicate position
+- §35 restart recovery exercised end to end against `SimBroker`
+- §36 performance: latency, memory, no runaway loops
+- §39 profitability — **NOT POSSIBLE HERE**, needs the operator's harvested history

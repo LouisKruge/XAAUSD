@@ -181,6 +181,8 @@ class TradingEngine:
         self.spec: SymbolSpec | None = None
         self.spec_hash: str | None = None
         self.running = False
+        # Loops that died, so `run()` and the CLI can report a crash rather than success.
+        self.crashed_loops: list[tuple[str, BaseException]] = []
         self.trades_today = 0
         self._last_decision_bar: int | None = None
         self._day: Any = None
@@ -316,7 +318,27 @@ class TradingEngine:
             with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(sig, self.stop)
 
-        await asyncio.gather(
+        # `return_exceptions=True` collects a task's exception instead of propagating it.
+        # That is deliberate — one loop dying must not cancel the others mid-trade — but
+        # the results were previously DISCARDED, so a dead loop was completely silent:
+        # the engine kept ticking and managing positions with, say, no decision loop,
+        # `run()` returned normally, and `cmd_run` exited 0 reporting success. An engine
+        # that has stopped deciding looks identical to a market with no setups, which is
+        # the confusion this project has paid for repeatedly.
+        #
+        # Each loop does guard itself with `except Exception`, so ordinary faults never
+        # reach here. What does reach here is what those guards cannot catch: anything
+        # raised outside the try (two loops sleep before theirs) and any BaseException —
+        # CancelledError, MemoryError. Rare, and precisely the cases worth shouting about.
+        names = (
+            "tick_loop",
+            "decision_loop",
+            "scalp_scanner",
+            "reconcile_loop",
+            "context_loop",
+            "command_loop",
+        )
+        results = await asyncio.gather(
             self._tick_loop(),
             self._decision_loop(),
             # A separate task, not a step inside the M5 cycle: a slow scalp scan must
@@ -327,6 +349,25 @@ class TradingEngine:
             self._command_loop(),
             return_exceptions=True,
         )
+
+        self.crashed_loops = [
+            (name, res)
+            for name, res in zip(names, results, strict=True)
+            if isinstance(res, BaseException) and not isinstance(res, asyncio.CancelledError)
+        ]
+        for name, exc in self.crashed_loops:
+            log.critical(
+                "engine_loop_crashed",
+                loop=name,
+                error=f"{type(exc).__name__}: {exc}",
+                exc_info=exc,
+            )
+        if self.crashed_loops:
+            self.notifier.critical(
+                "ENGINE",
+                "Engine stopped after a loop crashed",
+                ", ".join(f"{n}: {type(e).__name__}: {e}" for n, e in self.crashed_loops),
+            )
 
     def stop(self) -> None:
         log.warning("engine_stopping")
@@ -497,7 +538,13 @@ class TradingEngine:
             trades_today=self.trades_today,
             exposures=self._scalp_exposures(positions, account.equity, spec),
             strategy_status=self._strategy_status(),
-            broker_calc_profit=None,
+            # The same broker cross-check the A/A+ path has always had. This was a
+            # literal None, so the guard that refuses to size on a specification the
+            # broker cannot confirm covered A/A+ trades and not scalp trades — same
+            # account, same RiskGate, same broker. See BUG_REGISTER BUG-002.
+            calc_profit=lambda direction, entry, stop: self.broker.calc_profit(
+                self.symbol, direction, 1.0, entry, stop
+            ),
         )
 
         self._persist_scalp(cycle)
@@ -751,7 +798,20 @@ class TradingEngine:
                     r.strategy: ValidationStatus(r.status)
                     for r in Repositories(s).strategy_status.all()
                 }
-        except Exception:
+        except Exception as exc:
+            # Fail CLOSED and say so. An empty map means every model reads DEV, so
+            # `scalp_strategy_validated` refuses live routing — which is the right
+            # outcome. What was wrong is that it happened in silence: an operator saw a
+            # bot that had quietly stopped taking scalps, with nothing anywhere saying
+            # the strategy-status table could not be read. A safe failure that cannot be
+            # told apart from a quiet market is the confusion this project keeps paying
+            # for (FINDINGS 37, 41).
+            log.error(
+                "strategy_status_unavailable",
+                error=f"{type(exc).__name__}: {exc}",
+                consequence="every strategy reads DEV; live routing refused until this is fixed",
+            )
+            self.health.report("strategy_status", False, detail={"error": str(exc)})
             return {}
 
     def _persist_cycle(self, result) -> None:  # type: ignore[no-untyped-def]

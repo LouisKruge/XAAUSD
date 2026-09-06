@@ -48,6 +48,16 @@ from xauusd.strategy.scoring import ScoringEngine, reasons_for_and_against
 log = get_logger(__name__)
 
 
+class BrokerCrossCheckUnavailable(RuntimeError):
+    """The broker could not price a lot, on an account where money is real.
+
+    Raised rather than returned so it cannot be mistaken for "there is no broker to
+    ask", which is a legitimate state in a backtest and skips the check harmlessly. On
+    real money the same silence would mean sizing on a contract specification nothing
+    has confirmed.
+    """
+
+
 class ProbabilityModel(Protocol):
     """Optional. When absent the system degrades to score-only in A-only mode."""
 
@@ -160,22 +170,45 @@ class DecisionPipeline:
 
     # -- stages ------------------------------------------------------------------------
 
-    @staticmethod
-    def _broker_loss_for_one_lot(state: EngineState, plan: TradePlan) -> float | None:
+    def _broker_loss_for_one_lot(self, state: EngineState, plan: TradePlan) -> float | None:
         """What the broker says one lot loses moving from entry to stop.
 
-        Returns None when unavailable — no broker, or the call failed — because the
-        cross-check is corroboration, not a precondition. A broker that cannot answer
-        must not stop the engine evaluating; PositionSizer already refuses to trade when
-        the answer it gets DISAGREES, which is the case that matters.
+        `None` means there is NO BROKER TO ASK — a backtest, or a simulator with no
+        `OrderCalcProfit`. `PositionSizer` then skips the cross-check, which is right:
+        corroboration that cannot exist is not a precondition.
+
+        A broker that was asked and FAILED is a different thing, and the two used to
+        collapse into the same `None`. The consequence was that on real money, a broker
+        error silently skipped the one check standing between us and sizing on a misread
+        contract specification — and skipped it without a log line, so the trade's own
+        journal could not show the check had been bypassed. Everywhere else in this
+        system a missing input makes it less willing to trade; here it made it less
+        careful, which is the inversion `CLAUDE.md` forbids.
+
+        So: always log the failure, and on real money refuse rather than proceed. The
+        decision loop catches this, journals it, and places no trade for the cycle. A
+        broker that cannot price a single tick is not one to size positions against.
         """
         if state.calc_profit is None:
             return None
         try:
             value = state.calc_profit(plan.direction, plan.entry, plan.stop_loss)
-            return float(value) if value is not None else None
-        except Exception:
+        except Exception as exc:
+            log.error(
+                "broker_calc_profit_failed",
+                strategy=plan.strategy,
+                direction=str(plan.direction),
+                error=f"{type(exc).__name__}: {exc}",
+                real_money=self.settings.mode.is_real_money,
+            )
+            if self.settings.mode.is_real_money:
+                raise BrokerCrossCheckUnavailable(
+                    f"the broker could not price one lot for {plan.strategy}: "
+                    f"{type(exc).__name__}: {exc}. Refusing to size a real-money "
+                    f"position on arithmetic the broker cannot confirm."
+                ) from exc
             return None
+        return float(value) if value is not None else None
 
     def _detect(self, view: MarketView, snap: MarketSnapshot) -> list[TradePlan]:
         plans: list[TradePlan] = []

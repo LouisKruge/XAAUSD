@@ -27,6 +27,7 @@ from xauusd.domain.enums import (
     LevelKind,
     LiquidityKind,
     MacroBias,
+    Mode,
     NewsRisk,
     OrderBlockKind,
     Regime,
@@ -457,7 +458,8 @@ class TestTheBrokerCrossCheckIsActuallyWired:
     """
 
     def test_the_pipeline_asks_the_broker_what_a_loss_costs(self) -> None:
-        from xauusd.engine.pipeline import EngineState
+        from xauusd.config.settings import Settings
+        from xauusd.engine.pipeline import DecisionPipeline, EngineState
 
         asked: list[tuple] = []
 
@@ -467,21 +469,58 @@ class TestTheBrokerCrossCheckIsActuallyWired:
 
         state = EngineState(calc_profit=calc)
         plan = perfect_plan()
-        from xauusd.engine.pipeline import DecisionPipeline
+        # An instance rather than a static call: the helper now needs the MODE, because
+        # a broker that fails must be refused on real money and tolerated in a backtest,
+        # and those were previously the same silent `None`. See BUG_REGISTER BUG-001.
+        pipe = DecisionPipeline(Settings(mode=Mode.BACKTEST))
 
-        got = DecisionPipeline._broker_loss_for_one_lot(state, plan)
+        got = pipe._broker_loss_for_one_lot(state, plan)
         assert got == -100.0
         assert asked == [(plan.direction, plan.entry, plan.stop_loss)]
 
     def test_no_broker_answer_does_not_block_evaluation(self) -> None:
         """Corroboration, not a precondition: a broker that cannot answer must not stop
-        the engine. The sizer already refuses when the answer DISAGREES."""
+        the engine when no money is at stake. The sizer already refuses when the answer
+        DISAGREES.
+
+        On real money the same silence is not acceptable — see the LIVE case below and
+        tests/unit/test_broker_cross_check.py. This test pins the non-live behaviour,
+        which is unchanged.
+        """
+        from xauusd.config.settings import Settings
         from xauusd.engine.pipeline import DecisionPipeline, EngineState
 
-        assert DecisionPipeline._broker_loss_for_one_lot(EngineState(), perfect_plan()) is None
+        pipe = DecisionPipeline(Settings(mode=Mode.BACKTEST))
+        assert pipe._broker_loss_for_one_lot(EngineState(), perfect_plan()) is None
 
         def explodes(direction, entry, stop):  # type: ignore[no-untyped-def]
             raise RuntimeError("bridge down")
 
         state = EngineState(calc_profit=explodes)
-        assert DecisionPipeline._broker_loss_for_one_lot(state, perfect_plan()) is None
+        assert pipe._broker_loss_for_one_lot(state, perfect_plan()) is None
+
+    def test_a_broker_that_fails_on_real_money_refuses_rather_than_skipping(self) -> None:
+        """The half this class was missing, and the reason BUG-001 survived so long.
+
+        "A broker that cannot answer must not stop the engine" is right in a backtest
+        and wrong on a live account, where it means sizing on a contract specification
+        nothing has confirmed. The old code could not tell the two apart.
+        """
+        import pytest
+
+        from xauusd.config.settings import Settings
+        from xauusd.engine.pipeline import (
+            BrokerCrossCheckUnavailable,
+            DecisionPipeline,
+            EngineState,
+        )
+
+        def explodes(direction, entry, stop):  # type: ignore[no-untyped-def]
+            raise RuntimeError("bridge down")
+
+        pipe = DecisionPipeline(Settings(mode=Mode.LIVE, live_trading=True))
+        with pytest.raises(BrokerCrossCheckUnavailable):
+            pipe._broker_loss_for_one_lot(EngineState(calc_profit=explodes), perfect_plan())
+
+        # No broker at all is still not an error, even live: nothing was asked.
+        assert pipe._broker_loss_for_one_lot(EngineState(), perfect_plan()) is None

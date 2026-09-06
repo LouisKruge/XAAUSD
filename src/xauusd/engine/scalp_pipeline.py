@@ -24,12 +24,13 @@ as an A/A+ trade. There is one path to money.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from xauusd.config.settings import Settings
 from xauusd.core.micro_structure import MicroSnapshot
-from xauusd.domain.enums import Classification, ValidationStatus
+from xauusd.domain.enums import Classification, Direction, ValidationStatus
 from xauusd.domain.types import (
     AccountState,
     BrokerPosition,
@@ -130,7 +131,7 @@ class ScalpPipeline:
         trades_today: int = 0,
         exposures: list[OpenExposure] | None = None,
         strategy_status: dict[str, ValidationStatus] | None = None,
-        broker_calc_profit=None,  # type: ignore[no-untyped-def]
+        calc_profit: Callable[[Direction, float, float], float | None] | None = None,
     ) -> ScalpCycle:
         cycle = ScalpCycle(ts=now)
         positions = open_positions or []
@@ -180,13 +181,57 @@ class ScalpPipeline:
                     trades_today,
                     exposures,
                     status,
-                    broker_calc_profit,
+                    calc_profit,
                 )
                 cycle.evaluations.append(ev)
                 if ev.approved and cycle.executable is None:
                     cycle.executable = ev
 
         return cycle
+
+    def _broker_loss_for_one_lot(
+        self,
+        calc_profit: Callable[[Direction, float, float], float | None] | None,
+        signal: ScalpSignal,
+    ) -> float | None:
+        """The broker's own loss for one lot on THIS signal's entry and stop.
+
+        The scalp path used to hand `RiskGate` a literal `None` here, so the sizing
+        cross-check — the guard that refuses to trade when our loss-per-lot disagrees
+        with the broker's — protected A/A+ trades and not scalp trades, on the same
+        account, through the same gate, to the same broker. Eleventh instance of one
+        rule with several enforcement points where the newest path never learned it.
+
+        It has to be computed per SIGNAL rather than per scan: every candidate has its
+        own entry and stop, so one value shared across a cycle would be wrong for all
+        but the signal it came from — which is worse than no cross-check, because it
+        would compare against the wrong trade and still look like verification.
+
+        `None` means no broker to ask. A broker that fails on real money refuses, for
+        the reasons set out in `DecisionPipeline._broker_loss_for_one_lot`.
+        """
+        if calc_profit is None:
+            return None
+        try:
+            value = calc_profit(signal.direction, signal.entry, signal.stop_loss)
+        except Exception as exc:
+            log.error(
+                "broker_calc_profit_failed",
+                model=signal.model,
+                direction=str(signal.direction),
+                error=f"{type(exc).__name__}: {exc}",
+                real_money=self.settings.mode.is_real_money,
+            )
+            if self.settings.mode.is_real_money:
+                from xauusd.engine.pipeline import BrokerCrossCheckUnavailable
+
+                raise BrokerCrossCheckUnavailable(
+                    f"the broker could not price one lot for {signal.model}: "
+                    f"{type(exc).__name__}: {exc}. Refusing to size a real-money "
+                    f"position on arithmetic the broker cannot confirm."
+                ) from exc
+            return None
+        return float(value) if value is not None else None
 
     # -- one signal --------------------------------------------------------------------
 
@@ -205,7 +250,7 @@ class ScalpPipeline:
         trades_today: int,
         exposures: list[OpenExposure],
         strategy_status: dict[str, ValidationStatus],
-        broker_calc_profit,  # type: ignore[no-untyped-def]
+        calc_profit: Callable[[Direction, float, float], float | None] | None,
     ) -> ScalpEvaluation:
         score = self.scorer.score(signal.factors)
         ev = ScalpEvaluation(signal=signal, score=score.total, score_detail=score.as_dict())
@@ -316,7 +361,7 @@ class ScalpPipeline:
             open_positions=positions,
             open_risk_pct=open_risk_pct,
             trades_today=trades_today,
-            broker_calc_profit=broker_calc_profit,
+            broker_calc_profit=self._broker_loss_for_one_lot(calc_profit, signal),
         )
         ev.checks.extend(decision.checks)
         ev.plan = plan
