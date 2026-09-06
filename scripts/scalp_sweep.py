@@ -234,7 +234,17 @@ def main() -> int:
         seed = 5
         source = args.source
 
-    data = _load_data(_Args(), settings)
+    # `InsufficientHistory` is the expected outcome on a machine that has not
+    # harvested yet, and it deserves the sentence that explains the fix rather than a
+    # traceback. Converting SystemExit into a normal exception (BUG-005) made the pool
+    # behave; it also meant nothing was catching it here.
+    from xauusd.cli import InsufficientHistory
+
+    try:
+        data = _load_data(_Args(), settings)
+    except InsufficientHistory as exc:
+        print(f"\n{exc}")
+        return 2
     _SHARED["data"] = data
     m1 = data.get(Timeframe.M1)
     n_m1 = len(m1) if m1 else 0
