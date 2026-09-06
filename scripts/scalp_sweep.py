@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import multiprocessing as mp
+import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -40,6 +43,77 @@ MODELS = [
 ]
 
 
+_SHARED: dict[str, object] = {}
+
+
+def _one_config(job):  # type: ignore[no-untyped-def]
+    """Run one (min_score, target_rr) backtest. Executed in a worker process.
+
+    Reads the history from module state rather than taking it as an argument: on a
+    fork-based platform the child inherits it copy-on-write, and pickling several
+    hundred thousand bars per configuration would cost more than the run it feeds.
+    """
+    score, rr, settings, spec, warmup, step = job
+    data = _SHARED["data"]
+    tuned = settings.model_copy(
+        update={
+            "scalp": settings.scalp.model_copy(
+                update={
+                    "enabled": True,
+                    "enabled_models": MODELS,
+                    "min_score": score,
+                    "target_rr": rr,
+                }
+            )
+        }
+    )
+    engine = BacktestEngine(
+        tuned,
+        spec,
+        BacktestConfig(
+            starting_equity=10_000.0,
+            warmup_bars=warmup,
+            step=step,
+            decision_timeframe=Timeframe.M5,
+        ),
+    )
+    result = engine.run(data)  # type: ignore[arg-type]
+    m = result.metrics
+    scalps = [t for t in result.trades if str(getattr(t, "strategy", "")).startswith("scalp")]
+    row = (
+        score,
+        rr,
+        len(scalps),
+        m.win_rate,
+        m.expectancy_r,
+        m.profit_factor,
+        m.max_drawdown_pct,
+        m.total_r,
+    )
+    cand = (score, rr, len(result.scalp_scores), max(result.scalp_scores or [0.0]))
+    return score, rr, row, cand
+
+
+def _run_configs(configs, settings, spec, args):  # type: ignore[no-untyped-def]
+    """Yield one finished configuration at a time, in parallel where that is safe.
+
+    Falls back to running in-process when there is one worker or one configuration, so
+    the serial path stays available for debugging and for platforms without fork.
+    """
+    jobs = [(s, r, settings, spec, args.warmup, args.step) for s, r in configs]
+    workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
+    workers = max(1, min(workers, len(jobs)))
+
+    if workers == 1 or mp.get_start_method(allow_none=True) not in (None, "fork"):
+        for job in jobs:
+            yield _one_config(job)
+        return
+
+    ctx = mp.get_context("fork")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
+        yield from pool.map(_one_config, jobs)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="sweep scalp score threshold and target RR")
     ap.add_argument("--scores", default="50,55,60,65,70")
@@ -47,6 +121,12 @@ def main() -> int:
     ap.add_argument("--warmup", type=int, default=2000)
     ap.add_argument("--step", type=int, default=3)
     ap.add_argument("--source", default="mt5")
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="parallel backtests; 0 = one per CPU, 1 = serial (deterministic either way)",
+    )
     ap.add_argument(
         "--min-trades",
         type=int,
@@ -75,6 +155,7 @@ def main() -> int:
         source = args.source
 
     data = _load_data(_Args(), settings)
+    _SHARED["data"] = data
     m1 = data.get(Timeframe.M1)
     n_m1 = len(m1) if m1 else 0
     print(f"history          : {len(data[Timeframe.M5])} M5, {n_m1} M1", flush=True)
@@ -112,11 +193,13 @@ def main() -> int:
     # `step` gates only the decide-and-score work; every bar is still walked to settle
     # fills and manage positions. Counting M1 bars here overstated the work fivefold.
     instants = max(0, (len(data[Timeframe.M5]) - args.warmup)) // max(args.step, 1)
+    workers = max(1, min(args.workers or (os.cpu_count() or 1), len(configs)))
+    minutes = len(configs) * instants / 25 / workers / 60
     print(
         f"\nplan             : {len(configs)} configurations x ~{instants:,} decision "
         f"instants each\n"
-        f"                   at roughly 10-15 instants/second this is on the order of "
-        f"{len(configs) * instants / 12 / 3600:.1f} hours.\n"
+        f"                   ~25 instants/second across {workers} worker(s), so on the "
+        f"order of {minutes:.0f} minutes.\n"
         f"                   Narrow it with --scores/--rrs, or sample less densely with "
         f"a larger --step.\n"
         f"                   Rows print as each configuration finishes; nothing is lost "
@@ -132,43 +215,26 @@ def main() -> int:
     rows = []
     candidates: list[tuple[float, float, int, float]] = []
     started = time.monotonic()
-    for done, (score, rr) in enumerate(configs, start=1):
-        tuned = settings.model_copy(
-            update={
-                "scalp": settings.scalp.model_copy(
-                    update={
-                        "enabled": True,
-                        "enabled_models": MODELS,
-                        "min_score": score,
-                        "target_rr": rr,
-                    }
-                )
-            }
-        )
-        engine = BacktestEngine(
-            tuned,
-            spec,
-            BacktestConfig(
-                starting_equity=10_000.0,
-                warmup_bars=args.warmup,
-                step=args.step,
-                decision_timeframe=Timeframe.M5,
-            ),
-        )
-        result = engine.run(data)
-        m = result.metrics
-        scalps = [t for t in result.trades if str(getattr(t, "strategy", "")).startswith("scalp")]
-        candidates.append((score, rr, len(result.scalp_scores), max(result.scalp_scores or [0.0])))
+
+    # Each configuration is a completely independent run of a deterministic engine, so
+    # they can go in parallel with no effect on any result. On fork-based platforms the
+    # workers inherit the already-loaded history through copy-on-write, so nothing large
+    # is pickled across the process boundary.
+    #
+    # Results arrive out of order and are sorted before ranking, so the printed table
+    # and the chosen winner do not depend on which worker finished first.
+    for done, (score, rr, row, cand) in enumerate(_run_configs(configs, settings, spec, args), 1):
+        rows.append(row)
+        candidates.append(cand)
+        n_scalps, win_rate, expectancy, pf, max_dd, total_r = row[2:]
         elapsed = time.monotonic() - started
         remaining = elapsed / done * (len(configs) - done)
         print(
-            f"{score:>6.0f} {rr:>5.2f} {len(scalps):>7} {m.win_rate * 100:>5.1f}% "
-            f"{m.expectancy_r:>+8.3f} {m.profit_factor:>6.2f} "
-            f"{m.max_drawdown_pct * 100:>6.2f}% {m.total_r:>+8.2f}"
+            f"{score:>6.0f} {rr:>5.2f} {n_scalps:>7} {win_rate * 100:>5.1f}% "
+            f"{expectancy:>+8.3f} {pf:>6.2f} {max_dd * 100:>6.2f}% {total_r:>+8.2f}"
             f"  {done}/{len(configs)}, ~{remaining / 60:.0f} min left",
             flush=True,
         )
-        rows.append((score, rr, len(scalps), m.win_rate, m.expectancy_r, m.total_r))
 
     # Say how many candidates existed before any threshold judged them. Without this,
     # "0 trades at every setting" reads as "the models found nothing", when the far more
