@@ -272,6 +272,19 @@ class ScalpConfig(ConfigSection):
     min_score: float = Field(65.0, ge=0, le=100)
 
     max_hold_minutes: int = Field(90, ge=1, le=1440)
+    # A target the holding window cannot deliver is not a target, it is a time stop with
+    # extra steps. Price covers distance with the SQUARE ROOT of time, so a target k ATR
+    # away needs on the order of k^2 five-minute bars. A flat 90-minute clock therefore
+    # gives a 1.2 ATR target ten times the time it needs and a 7.0 ATR target a third of
+    # it — and the wide ones are structurally unable to pay out, which shows up as
+    # "winners cut short" and is easily mistaken for a bad win rate.
+    #
+    # Set 0 to disable the cap and keep the old behaviour.
+    cap_target_to_holding_window: bool = True
+    # Scales the reachable distance. 1.0 is the plain diffusion estimate; below 1.0 is
+    # stricter, above 1.0 bets that trends travel further than a random walk. It is a
+    # hypothesis for the sweep to test, not a tuned value.
+    reachability_factor: float = Field(1.0, gt=0, le=3.0)
     min_stop_atr: float = Field(0.8, gt=0, description="Floor on stop width, in M5 ATR.")
     max_stop_atr: float = Field(3.5, gt=0, description="Ceiling; wider is not a scalp.")
 
@@ -682,6 +695,23 @@ class Settings(BaseSettings):
         if strategy and strategy.startswith("scalp"):
             return max(1, round(self.scalp.max_hold_minutes * 60 / max(bar_seconds, 1)))
         return self.execution.time_stop_bars
+
+    def reachable_target_distance(self, atr: float) -> float | None:
+        """The furthest a scalp target can sit and still be reached in the window.
+
+        Diffusion scaling: a move of k ATR takes about k^2 bars of the timeframe that
+        ATR was measured on. Inverting for the holding window gives
+        k = sqrt(minutes / 5), so a 90-minute window reaches about 4.24 M5 ATR.
+
+        Returns None when the cap is disabled or the ATR is unusable, meaning "no
+        ceiling" — never a guessed distance.
+        """
+        if not self.scalp.cap_target_to_holding_window:
+            return None
+        if atr != atr or atr <= 0:  # NaN or nonsense; no judgement available
+            return None
+        bars = self.scalp.max_hold_minutes / 5.0
+        return (bars**0.5) * self.scalp.reachability_factor * atr
 
     def min_rr_for(self, classification: object) -> float:
         """The reward-to-risk floor that applies to this trade tier.

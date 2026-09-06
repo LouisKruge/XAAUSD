@@ -134,3 +134,96 @@ class TestItAgreesWithTheRestOfTheSystem:
         kept = _obstacles(_Snap(), _Micro(pools))
         expected = [p.price for p in pools if p.is_resting]
         assert kept == expected
+
+
+class TestTargetsMustBeReachableInsideTheHoldingWindow:
+    """A target the clock cannot deliver is a time stop wearing a target's name.
+
+    Measured on real harvested history: win rate 40.6% against a 36.4% breakeven at
+    RR 1.75 — a POSITIVE gross edge — yet net expectancy -0.136R. The gap between the
+    two grew with the target (0.157R at 1.5R, 0.253R at 1.75R, 0.377R at 2.0R), and
+    costs do not scale with target distance. That is the signature of winners running
+    out of clock, not of bad setups.
+
+    Price covers distance with the square root of time, so a target k ATR away needs
+    about k^2 five-minute bars. A flat 90-minute window reaches ~4.24 ATR — while a
+    3.5 ATR stop at 2.0R aims 7.0 ATR away and needs about 245 minutes. Those trades
+    could never pay out.
+    """
+
+    def test_the_reachable_distance_follows_the_square_root_of_time(self) -> None:
+        from xauusd.config.settings import Settings
+
+        s = Settings()
+        atr = 1.0
+        reach = s.reachable_target_distance(atr)
+        assert reach is not None
+        # 90 minutes = 18 M5 bars -> sqrt(18) = 4.24 ATR
+        assert reach == pytest.approx((90 / 5) ** 0.5, rel=1e-6)
+
+    def test_a_longer_window_reaches_further_but_only_as_a_square_root(self) -> None:
+        """Four times the time buys twice the distance, not four times."""
+        from xauusd.config.settings import Settings
+
+        base = Settings()
+        short = base.model_copy(
+            update={"scalp": base.scalp.model_copy(update={"max_hold_minutes": 30})}
+        )
+        long = base.model_copy(
+            update={"scalp": base.scalp.model_copy(update={"max_hold_minutes": 120})}
+        )
+        assert long.reachable_target_distance(1.0) == pytest.approx(
+            2.0 * short.reachable_target_distance(1.0), rel=1e-6
+        )
+
+    def test_an_unreachable_target_is_pulled_in(self) -> None:
+        entry, stop = 2000.0, 1996.5  # 3.5 risk; at 2.0R the target is 7.0 away
+        target, rationale = structural_target(
+            entry, stop, Direction.LONG, 2.0, [], max_distance=4.24
+        )
+        assert target == pytest.approx(2004.24)
+        assert "capped" in rationale
+        assert "holding window" in rationale
+
+    def test_a_reachable_target_is_left_alone(self) -> None:
+        entry, stop = 2000.0, 1999.0  # 1.0 risk; at 1.5R the target is 1.5 away
+        target, rationale = structural_target(
+            entry, stop, Direction.LONG, 1.5, [], max_distance=4.24
+        )
+        assert target == pytest.approx(2001.5)
+        assert "capped" not in rationale
+
+    def test_the_cap_never_pushes_a_target_further_out(self) -> None:
+        """It is a ceiling, not a setting. A generous window must not widen targets."""
+        entry, stop = 2000.0, 1999.0
+        plain, _ = structural_target(entry, stop, Direction.LONG, 1.5, [])
+        for reach in (0.5, 1.5, 5.0, 100.0):
+            with_cap, _ = structural_target(
+                entry, stop, Direction.LONG, 1.5, [], max_distance=reach
+            )
+            assert with_cap <= plain
+
+    def test_the_mirror_holds_for_a_short(self) -> None:
+        entry, stop = 2000.0, 2003.5
+        target, rationale = structural_target(
+            entry, stop, Direction.SHORT, 2.0, [], max_distance=4.24
+        )
+        assert target == pytest.approx(1995.76)
+        assert "capped" in rationale
+
+    def test_disabling_the_cap_restores_the_old_behaviour(self) -> None:
+        from xauusd.config.settings import Settings
+
+        base = Settings()
+        off = base.model_copy(
+            update={"scalp": base.scalp.model_copy(update={"cap_target_to_holding_window": False})}
+        )
+        assert off.reachable_target_distance(1.0) is None
+
+    def test_an_unusable_atr_yields_no_ceiling_rather_than_a_guess(self) -> None:
+        """Warm-up must not invent a distance. No judgement means no cap."""
+        from xauusd.config.settings import Settings
+
+        s = Settings()
+        assert s.reachable_target_distance(float("nan")) is None
+        assert s.reachable_target_distance(0.0) is None

@@ -178,6 +178,7 @@ class _Base:
             direction,
             self.cfg.target_rr,
             _obstacles(snap, micro, htf.obstacles),
+            max_distance=self.settings.reachable_target_distance(micro.atr_m5),
         )
         # Record the ATR the stop was scaled against. Every structural threshold in the
         # system is ATR-scaled, so a journal entry without it cannot be re-derived later.

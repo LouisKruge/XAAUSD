@@ -181,6 +181,7 @@ def structural_target(
     target_rr: float,
     obstacles: list[float],
     min_rr: float = 0.75,
+    max_distance: float | None = None,
 ) -> tuple[float, str]:
     """Target at the requested RR, pulled in to the nearest obstacle worth respecting.
 
@@ -197,7 +198,18 @@ def structural_target(
     risk = abs(entry - stop)
     if risk <= 0:
         return entry, "no risk distance"
-    ideal = entry + risk * target_rr if direction is Direction.LONG else entry - risk * target_rr
+    wanted = risk * target_rr
+    capped = ""
+    # A target the holding window cannot deliver is not a target. Price covers distance
+    # with the square root of time, so a far target on a wide stop simply runs out of
+    # clock and exits somewhere short — which reads in the results as "winners cut
+    # short" and is very easily mistaken for a poor win rate. Pull it to what the window
+    # can actually reach; if that leaves too little reward, the economics gates refuse
+    # the trade, which is the correct answer rather than a hopeful one.
+    if max_distance is not None and 0 < max_distance < wanted:
+        capped = f", capped to the {max_distance / risk:.2f}R reachable in the holding window"
+        wanted = max_distance
+    ideal = entry + wanted if direction is Direction.LONG else entry - wanted
     floor = entry + risk * min_rr if direction is Direction.LONG else entry - risk * min_rr
 
     ahead = [
@@ -207,6 +219,6 @@ def structural_target(
         or (direction is Direction.SHORT and ideal <= o <= floor)
     ]
     if not ahead:
-        return ideal, f"{target_rr:.2f}R, no obstacle beyond the {min_rr:.2f}R floor"
+        return ideal, f"{wanted / risk:.2f}R, no obstacle beyond the {min_rr:.2f}R floor{capped}"
     nearest = min(ahead) if direction is Direction.LONG else max(ahead)
-    return nearest, f"opposing level at {nearest:.2f}, short of the {target_rr:.2f}R target"
+    return nearest, f"opposing level at {nearest:.2f}, short of the {target_rr:.2f}R target{capped}"
