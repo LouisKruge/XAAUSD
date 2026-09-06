@@ -108,8 +108,10 @@ def main() -> int:
     # Every configuration re-walks the whole history, so the grid multiplies directly
     # into wall-clock time. Saying so up front is the difference between "this is taking
     # hours" and "this has hung" — and only one of those is worth killing.
-    base_tf = Timeframe.M1 if n_m1 >= 20_000 else Timeframe.M5
-    instants = max(0, (len(data[base_tf]) - args.warmup)) // max(args.step, 1)
+    # Decision instants are counted on the DECISION timeframe, which is M5 — not on M1.
+    # `step` gates only the decide-and-score work; every bar is still walked to settle
+    # fills and manage positions. Counting M1 bars here overstated the work fivefold.
+    instants = max(0, (len(data[Timeframe.M5]) - args.warmup)) // max(args.step, 1)
     print(
         f"\nplan             : {len(configs)} configurations x ~{instants:,} decision "
         f"instants each\n"

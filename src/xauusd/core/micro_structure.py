@@ -177,7 +177,18 @@ class MicroAnalyzer:
         if len(bars) < self.cfg.atr_period + 5:
             degraded.append(f"{tf}: only {len(bars)} bars, warming up")
             return None
-        return BarSeries.from_bars(tf, bars)
+        # `view.bars()` already returns a BarSeries. Rebuilding it through
+        # `BarSeries.from_bars` was a round trip to nowhere that cost 20% of the entire
+        # backtest: it iterated the series into `Bar` objects and re-derived arrays
+        # numerically identical to the ones it started from. Nine MILLION `Bar`
+        # constructions in a single run, each with a `datetime.fromtimestamp`, to
+        # reproduce data that was already in the right shape.
+        #
+        # Returning the view directly is safe because `BarSeries` is frozen, its arrays
+        # are created non-writeable, and a numpy slice of a read-only array is itself
+        # read-only — so no caller can mutate the source through it. Nothing in the
+        # engines writes to these arrays; they are read-only by construction and by use.
+        return bars
 
     def _swings(self, series: BarSeries, atr_value: float) -> list:  # list[RawSwing]
         if atr_value != atr_value or atr_value <= 0:

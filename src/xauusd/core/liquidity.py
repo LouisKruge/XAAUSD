@@ -200,29 +200,49 @@ class LiquidityEngine:
         sweeps: list[Sweep] = []
         window_start = max(0, n - cfg.sweep_lookback_bars)
 
+        # Pull the four columns into Python lists ONCE. This loop is the hottest code in
+        # the whole system — pools x lookback bars, and with ~120 pools over a 120-bar
+        # window that is ~14k iterations per call and tens of millions per backtest.
+        # Every `float(series.high[i])` was a numpy scalar extraction plus a Python
+        # float conversion, and doing that four times per iteration made this function
+        # 22% of total runtime by self time alone.
+        #
+        # `.tolist()` converts float64 to Python float exactly — these are the same IEEE
+        # doubles, not rounded copies — so every comparison and arithmetic result below
+        # is bit-for-bit what it was before.
+        highs = series.high.tolist()
+        lows = series.low.tolist()
+        closes = series.close.tolist()
+        opens = series.open.tolist()
+
         for pool in pools:
             formed_i = series.index_at_or_before(pool.formed_ts)
             scan_from = max(window_start, formed_i + 1, 1)
+            # Hoisted out of the inner loop: `is_buyside` is a property that reaches
+            # through to an enum property, and it was being evaluated tens of millions
+            # of times to re-derive a value that cannot change during the scan.
+            is_buyside = pool.is_buyside
+            pool_price = pool.price
             for i in range(scan_from, n):
-                hi, lo = float(series.high[i]), float(series.low[i])
-                close = float(series.close[i])
+                hi, lo = highs[i], lows[i]
+                close = closes[i]
                 rng = hi - lo
                 if rng <= 0:
                     continue
 
-                if pool.is_buyside:
-                    if hi <= pool.price:
+                if is_buyside:
+                    if hi <= pool_price:
                         continue
-                    penetration = hi - pool.price
-                    rejection = (hi - max(close, float(series.open[i]))) / rng
-                    closed_inside = close < pool.price
+                    penetration = hi - pool_price
+                    rejection = (hi - max(close, opens[i])) / rng
+                    closed_inside = close < pool_price
                     direction = Direction.SHORT
                 else:
-                    if lo >= pool.price:
+                    if lo >= pool_price:
                         continue
-                    penetration = pool.price - lo
-                    rejection = (min(close, float(series.open[i])) - lo) / rng
-                    closed_inside = close > pool.price
+                    penetration = pool_price - lo
+                    rejection = (min(close, opens[i]) - lo) / rng
+                    closed_inside = close > pool_price
                     direction = Direction.LONG
 
                 pen_atr = penetration / atr_value
@@ -237,10 +257,8 @@ class LiquidityEngine:
                     # Allow the rejection to complete over the next few bars.
                     resolved = False
                     for j in range(i + 1, min(i + 1 + cfg.sweep_max_bars_to_reject, n)):
-                        cj = float(series.close[j])
-                        if (pool.is_buyside and cj < pool.price) or (
-                            not pool.is_buyside and cj > pool.price
-                        ):
+                        cj = closes[j]
+                        if (is_buyside and cj < pool_price) or (not is_buyside and cj > pool_price):
                             bars_to_reject = j - i + 1
                             closed_inside = True
                             resolved = True
@@ -380,8 +398,16 @@ class LiquidityEngine:
         """Collapse pools at effectively the same price, keeping the strongest."""
         tol = self.cfg.equal_level_tolerance_atr * atr_value * 0.5
         kept: list[LiquidityPool] = []
+        # (price, side) carried alongside `kept` rather than re-read from each pool.
+        # This comparison is O(n^2) over several hundred pools, and `is_buyside` is a
+        # property reaching through to an enum property — so the original form evaluated
+        # it ~36 million times per backtest to re-derive values that never change.
+        # Same order, same tie-breaking, same output; only the lookups are cheaper.
+        kept_keys: list[tuple[float, bool]] = []
         for p in sorted(pools, key=lambda x: (-x.strength, -x.touches)):
-            if any(abs(p.price - k.price) <= tol and p.is_buyside == k.is_buyside for k in kept):
+            price, side = p.price, p.is_buyside
+            if any(abs(price - kp) <= tol and side == ks for kp, ks in kept_keys):
                 continue
             kept.append(p)
+            kept_keys.append((price, side))
         return sorted(kept, key=lambda p: p.price)
