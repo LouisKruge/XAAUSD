@@ -77,6 +77,20 @@ def _worker_init(source: str) -> None:
         _SHARED["data"] = _load_data(_A(), settings)
 
 
+def _describe_worker_failure(exc: BaseException) -> str:
+    """Turn a pool failure back into the sentence that explains it.
+
+    A worker that dies during initialisation reaches the parent as
+    `BrokenProcessPool`, which says nothing about why. The common cause by far is an
+    empty database, and that has an obvious fix worth printing.
+    """
+    from xauusd.cli import InsufficientHistory
+
+    if isinstance(exc, InsufficientHistory):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
+
+
 def _one_config(job):  # type: ignore[no-untyped-def]
     """Run one (min_score, target_rr) backtest. Executed in a worker process.
 
@@ -171,7 +185,7 @@ def _run_configs(configs, settings, spec, args):  # type: ignore[no-untyped-def]
     except Exception as exc:
         print(
             f"\n                   parallel run failed after {delivered}/{len(jobs)} "
-            f"configurations ({type(exc).__name__}: {exc}).\n"
+            f"configurations: {_describe_worker_failure(exc)}\n"
             f"                   Continuing serially — same numbers, just slower.",
             flush=True,
         )

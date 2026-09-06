@@ -439,7 +439,11 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     from xauusd.backtesting.engine import BacktestConfig, BacktestEngine
     from xauusd.domain.types import SymbolSpec
 
-    data = _load_data(args, settings)
+    try:
+        data = _load_data(args, settings)
+    except InsufficientHistory as exc:
+        print(str(exc))
+        return 2
     spec = SymbolSpec(
         settings.symbol,
         2,
@@ -497,6 +501,16 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+class InsufficientHistory(RuntimeError):
+    """Not enough bars in the database to run anything meaningful.
+
+    A normal exception rather than `SystemExit`, which inherits from `BaseException` and
+    so sails past every `except Exception`. Inside a process-pool worker that killed the
+    process outright and the caller saw only `BrokenProcessPool` — an opaque message for
+    a condition with an obvious fix. The scalp sweep hit exactly that.
+    """
+
+
 def _load_data(args: argparse.Namespace, settings: Settings) -> dict:
     """Load bars from the database, or generate synthetic data for a smoke run."""
     from xauusd.data.resample import build_timeframes
@@ -544,7 +558,12 @@ def _load_data(args: argparse.Namespace, settings: Settings) -> dict:
         return built
 
     if len(m5_bars) < 5000:
-        raise SystemExit(
+        # A typed exception, not SystemExit. SystemExit inherits from BaseException, so
+        # it sails past `except Exception` and, inside a process-pool worker, kills the
+        # process outright — the caller then sees only `BrokenProcessPool` and has to
+        # guess. The sweep hit exactly that. Callers that want the old behaviour catch
+        # this and exit; callers that want to recover now can.
+        raise InsufficientHistory(
             f"only {len(m5_bars)} M5 and {len(m1_bars)} M1 bars in the database for "
             f"{symbol!r}.\n"
             f"Download history first: dashboard System tab -> 'Download price "

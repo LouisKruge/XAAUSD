@@ -180,7 +180,7 @@ fail-closed return.
 |---|---|
 | **File** | `scripts/scalp_sweep.py` → `src/xauusd/cli.py:539` |
 | **Severity** | MEDIUM |
-| **Status** | MITIGATED, root cause open |
+| **Status** | FIXED |
 
 `_load_data` raises `SystemExit` when history is missing. In a pool worker that kills the
 process and surfaces as `BrokenProcessPool`. A serial fallback now catches it (commit
@@ -227,7 +227,7 @@ each, and adding the test that would have caught it.
 | BUG-002 scalp path had no cross-check | CRITICAL | **FIXED** | `test_broker_cross_check.py` (5) |
 | BUG-003 dead loop invisible, exit 0 | HIGH | **FIXED** | `test_engine_failure_visibility.py` (6) |
 | BUG-004 silent DB failure | HIGH | **FIXED** | `test_engine_failure_visibility.py` (2) |
-| BUG-005 SystemExit through a pool worker | MEDIUM | OPEN | — |
+| BUG-005 SystemExit through a pool worker | MEDIUM | **FIXED** | `test_failure_modes.py` |
 
 **A regression I caused and repaired.** Making `_broker_loss_for_one_lot` an instance
 method — it needs `settings.mode` to tell a live failure from an absent broker — broke
@@ -243,11 +243,43 @@ BEFORE fix (HEAD)        : calc_profit present=False -> TEST FAILS (bug present)
 AFTER fix (working tree) : calc_profit present=True  -> TEST PASSES
 ```
 
+## Round 2
+
+**BUG-005 FIXED.** `_load_data` raised `SystemExit`, which inherits from `BaseException`
+and so passes straight through every `except Exception`. Inside a pool worker it killed
+the process and the parent saw only `BrokenProcessPool` — an opaque message for a
+condition whose fix is one sentence. Now `InsufficientHistory(RuntimeError)`; the CLI
+catches it and exits 2 as before, and the sweep prints the real cause.
+
+**§41 final sweep — clean.** `TODO/FIXME/HACK/XXX` in `src/`: **0**. Six bare `pass`
+statements, each judged individually: five are empty exception-class bodies, one is
+`except KeyboardInterrupt: pass` in the bridge's shutdown path followed by a `finally`
+that stops the worker and the server. `print(` appears only in `cli.py` and
+`config/bootstrap.py`, both user-facing entry points. Nothing deleted blindly.
+
+**§34 failure injection — 10 tests added** (`tests/integration/test_failure_modes.py`),
+all passing:
+
+| Injected failure | Asserted response |
+|---|---|
+| Broker cannot price a lot, real money | Refuses (`BrokerCrossCheckUnavailable`) |
+| Broker's loss/lot disagrees 10x | Refuses to size; `lots == 0` |
+| Free margin far below requirement | Refuses to size; `lots == 0` |
+| ATR still NaN (warm-up) | `MicroSnapshot.usable` False |
+| Snapshot degraded despite good ATR | `usable` False |
+| Unusable data reaching the scalp cycle | Cycle skips; **no model runs at all** |
+| Kill switch tripped | Entries blocked with a stated reason |
+| Non-auto-clearable reason | Will not clear itself; needs a named human + force |
+| Broker holds a position we do not know | Adopted, not duplicated |
+| We hold a record the broker does not | Not adopted; divergence recorded |
+
+A first version of the recovery test used a hand-rolled position double and passed while
+the reconciler would have broken on a field the double omitted. It now uses the real
+`BrokerPosition`.
+
 ## Still to do
 
-- BUG-005: typed exception instead of `SystemExit` from `_load_data`
-- §41 final sweep (TODO/FIXME/HACK/`pass`/`print(`) with a judgement on each
-- §34 failure injection: MT5 disconnect, stale data, rejected order, duplicate position
-- §35 restart recovery exercised end to end against `SimBroker`
-- §36 performance: latency, memory, no runaway loops
+- §36 performance profiling under sustained load (latency, memory, no runaway loops)
 - §39 profitability — **NOT POSSIBLE HERE**, needs the operator's harvested history
+- Everything in the environment-limits table above, which needs a Windows machine with
+  MT5 attached
