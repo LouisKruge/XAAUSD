@@ -147,12 +147,28 @@ def g_spread(c: GateContext) -> GateResult:
 
 
 def g_session(c: GateContext) -> GateResult:
+    """The calendar/session filter, reported by the reason it actually failed.
+
+    `is_tradable_window` refuses for FIVE distinct reasons — market closed, weekday not
+    allowed, session not allowed, too soon after the weekly open, too close to the
+    weekly close — and this gate used to report only the session name against the
+    allowed-session list. So four of the five rendered as a flat self-contradiction:
+
+        X session   observed "LONDON" · required "['ASIA','LONDON','NEW_YORK',...]"
+
+    LONDON is plainly in that list. An operator reading it has been told the gate
+    refused a value it also says is acceptable, which is worse than no explanation: it
+    sends them hunting through session configuration for a fault that is actually the
+    weekend. The truth was in `detail` all along, and the trace did not show it.
+    """
     engine = c.session_engine or SessionEngine(c.settings.session)
     ok, why = engine.is_tradable_window(c.snapshot.ts)
+    session = str(c.snapshot.session.session)
     return GateResult(
         "session",
         ok,
-        observed=str(c.snapshot.session.session),
+        # On failure the observed value carries the reason, so the trace stands alone.
+        observed=session if ok else f"{session} — {why}",
         threshold=str([str(s) for s in c.settings.session.allowed_sessions]),
         detail=why,
     )

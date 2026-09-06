@@ -277,9 +277,57 @@ A first version of the recovery test used a hand-rolled position double and pass
 the reconciler would have broken on a field the double omitted. It now uses the real
 `BrokerPosition`.
 
-## Still to do
+## Round 3
 
-- §36 performance profiling under sustained load (latency, memory, no runaway loops)
+### BUG-006 — The session gate reported a self-contradiction
+
+| | |
+|---|---|
+| **File** | `src/xauusd/strategy/gates.py` — `g_session` |
+| **Severity** | HIGH (observability; it wasted operator time directly) |
+| **Status** | **FIXED** |
+
+Found in a live dashboard screenshot. The entire explanation the operator was given:
+
+```
+X  session   observed "LONDON" · required "['ASIA','LONDON','NEW_YORK','OVERLAP','OFF']"
+```
+
+LONDON is in that list. `is_tradable_window` refuses for **five** distinct reasons —
+market closed, weekday not allowed, session not allowed, too soon after the weekly
+open, too close to the weekly close — and the gate reported only the session name
+against the allowed set, so four of the five rendered as nonsense. Reproduced against
+the exact timestamp on the dashboard, 2026-09-06 06:30Z:
+
+```
+weekday=Sunday  tradable=False  reason='market closed'
+```
+
+The truth was in `detail` the whole time and the trace did not show it. A reader is sent
+to audit session configuration for a fault that is the weekend. `observed` now carries
+the reason on failure and stays clean on success; three tests pin it, one of which
+sweeps a whole week asserting no failing gate ever reports an observed value its own
+threshold lists as acceptable.
+
+### §36 performance — measured, within budget
+
+`scripts/perf_profile.py`, 400 instants over 30,000 M1 bars. Budgets are the engine's
+own cadence, not invented numbers: the scalp scanner's is its 2-second scan interval.
+
+| stage | p50 | p95 | p99 | max | budget | |
+|---|---|---|---|---|---|---|
+| market snapshot | 6.0ms | 31.2ms | 42.3ms | 70.0ms | 5000ms | OK |
+| micro snapshot | 9.1ms | 15.0ms | 17.6ms | 21.8ms | 2000ms | OK |
+| scalp cycle | 0.1ms | 0.3ms | 0.6ms | 1.0ms | 2000ms | OK |
+| **full instant** | **16.1ms** | **42.5ms** | **58.7ms** | **79.7ms** | 5000ms | OK |
+
+p99 is 58.7ms against a 2-second scan interval — roughly 34x headroom. Memory: **63.6 MB
+flat across all 400 instants, +0.0 KB/instant after warm-up.** No leak signature.
+
+The tail is what matters and it is measured rather than averaged away: a scanner whose
+p99 exceeds its own interval stops being continuous without ever reporting an error.
+
+## Still to do
 - §39 profitability — **NOT POSSIBLE HERE**, needs the operator's harvested history
 - Everything in the environment-limits table above, which needs a Windows machine with
   MT5 attached

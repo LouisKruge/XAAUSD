@@ -77,3 +77,73 @@ class TestTheSpreadIsNowTheFilter:
     def test_a_normal_asian_spread_is_within_the_ceiling(self) -> None:
         """~45 points: expensive but affordable. The engine may now evaluate it."""
         assert load_settings().execution.max_spread_points >= 45.0
+
+
+class TestTheSessionGateNamesTheRealReason:
+    """A gate trace must never contradict itself.
+
+    From a live dashboard, the whole of what the operator was told:
+
+        X  session   observed "LONDON" · required "['ASIA','LONDON','NEW_YORK','OVERLAP','OFF']"
+
+    LONDON is in that list. The refusal was real — it was a Saturday and the market was
+    closed — but `is_tradable_window` refuses for FIVE reasons and the gate reported only
+    the session name against the allowed set, so four of the five rendered as nonsense.
+    The reader is sent to audit session configuration for a fault that is the weekend.
+    """
+
+    def _ctx(self, ts):  # type: ignore[no-untyped-def]
+        from dataclasses import replace
+
+        from tests.integration.test_trade_path import perfect_snapshot
+
+        snap = perfect_snapshot()
+        return replace(snap, ts=ts)
+
+    def test_a_weekend_refusal_says_market_closed(self) -> None:
+        from datetime import UTC, datetime
+
+        from xauusd.config.settings import Settings
+        from xauusd.strategy.gates import GateContext, g_session
+
+        # 2026-09-06 is a Saturday — the timestamp from the operator's dashboard.
+        snap = self._ctx(datetime(2026, 9, 6, 6, 30, tzinfo=UTC))
+        result = g_session(GateContext(settings=Settings(), snapshot=snap))
+
+        assert not result.passed
+        assert "closed" in str(result.observed).lower(), (
+            f"the trace must say WHY, not just the session name: {result.observed!r}"
+        )
+
+    def test_the_observed_value_never_contradicts_the_requirement(self) -> None:
+        """The precise defect: a failing gate whose observed value is in its own
+        allowed list, with nothing to explain the difference."""
+        from datetime import UTC, datetime
+
+        from xauusd.config.settings import Settings
+        from xauusd.strategy.gates import GateContext, g_session
+
+        settings = Settings()
+        allowed = {str(s) for s in settings.session.allowed_sessions}
+        for day in range(1, 8):  # a whole week, weekdays and weekend alike
+            snap = self._ctx(datetime(2026, 9, day, 10, 0, tzinfo=UTC))
+            result = g_session(GateContext(settings=settings, snapshot=snap))
+            if result.passed:
+                continue
+            observed = str(result.observed)
+            assert observed not in allowed, (
+                f"gate failed with observed {observed!r}, which its own threshold lists "
+                f"as acceptable, and offered no other reason"
+            )
+
+    def test_a_passing_gate_still_reports_the_plain_session(self) -> None:
+        """The reason is added on failure only; a passing trace stays clean."""
+        from datetime import UTC, datetime
+
+        from xauusd.config.settings import Settings
+        from xauusd.strategy.gates import GateContext, g_session
+
+        snap = self._ctx(datetime(2026, 9, 2, 9, 0, tzinfo=UTC))  # a Wednesday
+        result = g_session(GateContext(settings=Settings(), snapshot=snap))
+        if result.passed:
+            assert "—" not in str(result.observed)
