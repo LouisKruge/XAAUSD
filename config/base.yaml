@@ -39,21 +39,26 @@ scalp:
     - scalp_ob_reaction
     - scalp_breakout_retest
     - scalp_momentum_continuation
-  risk_pct: 0.0015            # 10 concurrent would be 1.50%, inside the 2% cap
+  risk_pct: 0.005             # spec 2/4: 0.25-0.75%, default 0.50%
   # The correlation gate is wired into ScalpPipeline and consulted on every candidate,
   # so positions can now overlap. 5 x 0.15% = 0.75% open risk, well inside the 2% cap,
   # and the same-zone / same-pool / same-model budgets stop those five becoming one
   # leveraged bet. Raise further only on evidence from the cluster-drawdown metric.
-  max_concurrent: 5
+  max_concurrent: 3           # spec 14: 3-5 simultaneous; 3 x 0.50% = 1.50% aggregate
   max_cost_fraction: 0.35     # costs may not exceed 35% of 1R
   min_net_expectancy_r: 0.05  # positive by a margin, not by a rounding error
   assumed_win_probability: 0.55
-  target_rr: 1.5
-  min_gross_rr: 1.25          # below this a high win rate stops being worth having
-  min_score: 65.0             # (validated) placeholder - sweep this first
-  max_hold_minutes: 90
+  target_rr: 1.0            # spec 12: test 0.75 / 1.0 / 1.25 / 1.5 — sweep decides
+  min_gross_rr: 0.75          # spec 12 puts 0.75R in the test range; 1.25 excluded it
+  min_score: 75.0             # spec 10: default 75/100, 90+ is an A+ scalp
+  max_hold_minutes: 10        # spec 5/13: 30s-10m, exit rather than sit and hope
   min_stop_atr: 0.8
-  max_stop_atr: 3.5
+  # A 10-minute window covers about sqrt(10/5) = 1.41 M5 ATR. A stop wider than that
+  # cannot reach even a 1.0R target before the clock runs out, so the trade is sized for
+  # a reward it can never collect. 1.4 keeps the stop range coherent with the holding
+  # period the spec asks for; widening one without the other reintroduces the exact
+  # mismatch that made targets unreachable.
+  max_stop_atr: 1.4
 
 risk:
   risk_pct_a: 0.01

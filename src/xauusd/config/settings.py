@@ -351,6 +351,21 @@ class ScalpScoreWeights(ConfigSection):
         return self
 
 
+class RegimeControllerConfig(ConfigSection):
+    """Thresholds for the layer that decides which engine may trade (spec §31).
+
+    Deliberately few knobs. The controller's job is to remove permission in conditions
+    where an engine's hypothesis does not hold, not to become a second strategy with its
+    own tuning surface.
+    """
+
+    enabled: bool = True
+    # Above this multiple of the median, execution is unreliable enough that neither
+    # engine should open new risk. Distinct from `execution.max_spread_ratio`, which
+    # refuses one order; this halts an engine.
+    abnormal_spread_ratio: float = Field(3.0, gt=1.0, le=10.0)
+
+
 class LiquidityConfig(ConfigSection):
     equal_level_tolerance_atr: float = Field(0.10, gt=0, le=1.0)
     min_equal_touches: int = Field(2, ge=2)
@@ -631,6 +646,7 @@ class Settings(BaseSettings):
     micro_structure: MicroStructureConfig = Field(default_factory=MicroStructureConfig)
     scalp: ScalpConfig = Field(default_factory=ScalpConfig)
     scalp_score: ScalpScoreWeights = Field(default_factory=ScalpScoreWeights)
+    regime_controller: RegimeControllerConfig = Field(default_factory=RegimeControllerConfig)
     liquidity: LiquidityConfig = Field(default_factory=LiquidityConfig)
     fvg: FVGConfig = Field(default_factory=FVGConfig)
     order_block: OrderBlockConfig = Field(default_factory=OrderBlockConfig)
