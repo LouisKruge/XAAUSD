@@ -18,6 +18,8 @@ test out-of-sample, never as a setting to deploy.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import itertools
 import multiprocessing as mp
 import os
@@ -46,12 +48,41 @@ MODELS = [
 _SHARED: dict[str, object] = {}
 
 
+def _worker_init(source: str) -> None:
+    """Give a worker its own copy of the history, if it did not inherit one.
+
+    Two process models have to be served and they behave very differently:
+
+      fork  (Linux, macOS) — the child inherits `_SHARED` copy-on-write. Nothing to do.
+      spawn (Windows)      — the child is a fresh interpreter that re-imports this
+                             module, so `_SHARED` is empty and the data must be loaded.
+
+    Loading once per WORKER rather than once per configuration is what keeps this cheap:
+    four loads for a twenty-configuration grid. Passing the bars as an argument instead
+    would pickle several hundred thousand of them per job.
+    """
+    if "data" in _SHARED:
+        return
+    configure_logging("ERROR", json_output=False)
+    from xauusd.cli import _load_data
+
+    class _A:
+        synthetic = 0
+        seed = 5
+
+    _A.source = source  # type: ignore[attr-defined]
+    settings = load_settings()
+    # `_load_data` narrates what it found, which is useful once and noise four times.
+    with contextlib.redirect_stdout(io.StringIO()):
+        _SHARED["data"] = _load_data(_A(), settings)
+
+
 def _one_config(job):  # type: ignore[no-untyped-def]
     """Run one (min_score, target_rr) backtest. Executed in a worker process.
 
-    Reads the history from module state rather than taking it as an argument: on a
-    fork-based platform the child inherits it copy-on-write, and pickling several
-    hundred thousand bars per configuration would cost more than the run it feeds.
+    Reads the history from module state rather than taking it as an argument: pickling
+    several hundred thousand bars per configuration would cost more than the run it
+    feeds. `_worker_init` guarantees it is there under either process model.
     """
     score, rr, settings, spec, warmup, step = job
     data = _SHARED["data"]
@@ -98,20 +129,55 @@ def _run_configs(configs, settings, spec, args):  # type: ignore[no-untyped-def]
     """Yield one finished configuration at a time, in parallel where that is safe.
 
     Falls back to running in-process when there is one worker or one configuration, so
-    the serial path stays available for debugging and for platforms without fork.
+    the serial path stays available for debugging.
+
+    The context is the PLATFORM DEFAULT, not a hardcoded "fork". Asking for fork by name
+    is an outright crash on Windows — `ValueError: cannot find context for 'fork'` — and
+    the check that was supposed to prevent it tested `get_start_method(allow_none=True)`,
+    which returns None when no method has been chosen yet and so read as "fork is fine"
+    on a platform that has never had fork. Linux never exercised the fallback, so the
+    guard was wrong and untested at the same time; the sweep died on the first Windows
+    run. `_worker_init` is what makes the default context enough either way.
     """
     jobs = [(s, r, settings, spec, args.warmup, args.step) for s, r in configs]
     workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
     workers = max(1, min(workers, len(jobs)))
 
-    if workers == 1 or mp.get_start_method(allow_none=True) not in (None, "fork"):
+    if workers == 1:
         for job in jobs:
             yield _one_config(job)
         return
 
-    ctx = mp.get_context("fork")
-    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
-        yield from pool.map(_one_config, jobs)
+    # Anything that goes wrong with the pool falls back to serial, which produces
+    # identical numbers. Wrapping only the CONSTRUCTOR was not enough: under spawn the
+    # initializer runs in the child, so a failure there (no history in the database, a
+    # locked file, a missing dependency) surfaces much later as BrokenProcessPool while
+    # `map` is being consumed — an opaque message, mid-run, after the plan has printed.
+    #
+    # Results already delivered are tracked so the fallback resumes rather than repeats:
+    # `map` yields in submission order, so the index identifies the configuration.
+    delivered = 0
+    try:
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=mp.get_context(),
+            initializer=_worker_init,
+            initargs=(args.source,),
+        ) as pool:
+            for res in pool.map(_one_config, jobs):
+                delivered += 1
+                yield res
+        return
+    except Exception as exc:
+        print(
+            f"\n                   parallel run failed after {delivered}/{len(jobs)} "
+            f"configurations ({type(exc).__name__}: {exc}).\n"
+            f"                   Continuing serially — same numbers, just slower.",
+            flush=True,
+        )
+
+    for job in jobs[delivered:]:
+        yield _one_config(job)
 
 
 def main() -> int:
