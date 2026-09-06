@@ -21,6 +21,7 @@ almost never wants two at once.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
@@ -330,6 +331,21 @@ class JobRunner:
 
     def _run(self, job: Job, argv: list[str]) -> None:
         try:
+            # PYTHONUNBUFFERED is what actually makes the output pane live.
+            #
+            # `bufsize=1` below is line buffering on the READER's side and does nothing
+            # about the child's own stdout. A child writing to a pipe rather than a TTY
+            # block-buffers at ~8KB, so nothing reached the browser until 8KB had
+            # accumulated or the process exited — on a long job, half an hour of looking
+            # exactly like a hang.
+            #
+            # This was invisible for as long as every job also emitted a flood of debug
+            # logging, which filled 8KB in milliseconds and kept the pipe moving by
+            # accident. Silencing that logging in the scalp sweep removed the accidental
+            # flushing and exposed the real defect underneath: a job that prints its plan
+            # and then works quietly showed "(no output yet)" indefinitely.
+            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+
             # shell=False with a list argv: nothing here is parsed as a command line.
             proc = subprocess.Popen(
                 argv,
@@ -338,6 +354,7 @@ class JobRunner:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=env,
             )
             with self._lock:
                 self._process = proc

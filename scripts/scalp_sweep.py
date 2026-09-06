@@ -77,7 +77,7 @@ def main() -> int:
     data = _load_data(_Args(), settings)
     m1 = data.get(Timeframe.M1)
     n_m1 = len(m1) if m1 else 0
-    print(f"history          : {len(data[Timeframe.M5])} M5, {n_m1} M1")
+    print(f"history          : {len(data[Timeframe.M5])} M5, {n_m1} M1", flush=True)
     if n_m1 < 10_000:
         print(
             "\nWARNING: the scalp engine triggers on M1. With this little M1 history\n"
@@ -118,12 +118,14 @@ def main() -> int:
         f"                   Narrow it with --scores/--rrs, or sample less densely with "
         f"a larger --step.\n"
         f"                   Rows print as each configuration finishes; nothing is lost "
-        f"if you stop early."
+        f"if you stop early.",
+        flush=True,
     )
 
     print(
         f"\n{'score':>6} {'RR':>5} {'trades':>7} {'win%':>6} {'expR':>8} "
-        f"{'PF':>6} {'maxDD':>7} {'totalR':>8}  progress"
+        f"{'PF':>6} {'maxDD':>7} {'totalR':>8}  progress",
+        flush=True,
     )
     rows = []
     candidates: list[tuple[float, float, int, float]] = []

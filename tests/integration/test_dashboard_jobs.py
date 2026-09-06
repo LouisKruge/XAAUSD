@@ -192,3 +192,63 @@ class TestTheJobApiIsGuardedToo:
             "harvest",
             "scalp_sweep",
         }
+
+
+class TestJobOutputArrivesWhileTheJobIsStillRunning:
+    """A job that prints and then works quietly must not look like a hang.
+
+    `bufsize=1` on Popen is line buffering on the READER's side and says nothing about
+    the child's own stdout. A child writing to a pipe rather than a terminal
+    block-buffers at ~8KB, so its first line can sit unseen until the process exits.
+
+    This went unnoticed for as long as every job also emitted a flood of debug logging,
+    which filled 8KB immediately and kept the pipe moving by accident. Silencing that
+    logging in the scalp sweep removed the accidental flushing and the dashboard showed
+    "(no output yet)" for half an hour on a job that was working perfectly.
+    """
+
+    def test_the_runner_forces_unbuffered_child_output(self) -> None:
+        """Pinned at the source rather than by timing, so it cannot flake."""
+        import inspect
+
+        from xauusd.dashboard.jobs import JobRunner
+
+        source = inspect.getsource(JobRunner._run)
+        assert "PYTHONUNBUFFERED" in source, (
+            "JobRunner._run must set PYTHONUNBUFFERED for the child, or a slow job's "
+            "output is withheld until it exits and the dashboard cannot be told apart "
+            "from a hung one."
+        )
+
+    def test_a_slow_child_reaches_the_reader_before_it_exits(self) -> None:
+        """The behaviour itself, with a child that prints once and then waits.
+
+        Without the fix the read blocks for the child's whole lifetime; with it the
+        line arrives immediately. The assertion is deliberately loose — it only has to
+        separate "arrives while running" from "arrives at exit".
+        """
+        import os
+        import subprocess
+        import sys
+        import time
+
+        child = "import time\nprint('working')\ntime.sleep(3)\n"
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        try:
+            started = time.monotonic()
+            assert proc.stdout is not None
+            line = proc.stdout.readline()
+            waited = time.monotonic() - started
+            assert line.strip() == "working"
+            assert waited < 2.0, f"first line took {waited:.2f}s — output is being withheld"
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
