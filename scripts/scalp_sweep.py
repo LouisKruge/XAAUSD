@@ -284,7 +284,13 @@ def main() -> int:
     # fills and manage positions. Counting M1 bars here overstated the work fivefold.
     instants = max(0, (len(data[Timeframe.M5]) - args.warmup)) // max(args.step, 1)
     workers = max(1, min(args.workers or (os.cpu_count() or 1), len(configs)))
-    minutes = len(configs) * instants / 25 / workers / 60
+    # ~3 decision instants per second per worker, MEASURED on a real 20-config run over
+    # 7,999 M5 bars, not derived from a component benchmark. An earlier version used 25,
+    # taken from timing the analyser alone, and under-estimated by eight times: a
+    # backtest walks EVERY bar to settle fills and manage positions, and only decides on
+    # one in `step`, so the per-instant cost of the analyser is a fraction of the work.
+    # An estimate that says seven minutes for an hour-long job is worse than none.
+    minutes = len(configs) * instants / 3.0 / workers / 60
     print(
         f"\nplan             : {len(configs)} configurations x ~{instants:,} decision "
         f"instants each\n"
