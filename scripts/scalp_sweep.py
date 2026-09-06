@@ -125,6 +125,17 @@ def _one_config(job):  # type: ignore[no-untyped-def]
     result = engine.run(data)  # type: ignore[arg-type]
     m = result.metrics
     scalps = [t for t in result.trades if str(getattr(t, "strategy", "")).startswith("scalp")]
+
+    # How the trades ENDED, and what each ending was worth. This is the difference
+    # between "I am losing" and knowing why: a book full of TIME_STOP exits means the
+    # targets are not being reached in the holding window, which looks identical to a
+    # bad win rate in the summary row and needs the opposite fix.
+    endings: dict[str, tuple[int, float]] = {}
+    for t in scalps:
+        key = str(t.exit_reason)
+        n, total = endings.get(key, (0, 0.0))
+        endings[key] = (n + 1, total + t.r_multiple)
+
     row = (
         score,
         rr,
@@ -135,7 +146,7 @@ def _one_config(job):  # type: ignore[no-untyped-def]
         m.max_drawdown_pct,
         m.total_r,
     )
-    cand = (score, rr, len(result.scalp_scores), max(result.scalp_scores or [0.0]))
+    cand = (score, rr, len(result.scalp_scores), max(result.scalp_scores or [0.0]), endings)
     return score, rr, row, cand
 
 
@@ -336,6 +347,31 @@ def main() -> int:
     # "0 trades at every setting" reads as "the models found nothing", when the far more
     # likely reading is that a gate downstream of the score refused all of them — and
     # those call for opposite responses.
+    merged: dict[str, tuple[int, float]] = {}
+    for c in candidates:
+        for key, (n, total) in (c[4] if len(c) > 4 else {}).items():
+            have_n, have_r = merged.get(key, (0, 0.0))
+            merged[key] = (have_n + n, have_r + total)
+    if merged:
+        total_trades = sum(n for n, _ in merged.values())
+        print(f"\nHOW TRADES ENDED (all configurations, {total_trades} scalp trades)")
+        print(f"  {'exit reason':<16} {'count':>7} {'share':>7} {'avg R':>8} {'total R':>9}")
+        for key, (n, total) in sorted(merged.items(), key=lambda kv: -kv[1][0]):
+            print(
+                f"  {key:<16} {n:>7} {100 * n / total_trades:>6.1f}% "
+                f"{total / n:>+8.3f} {total:>+9.2f}"
+            )
+        tp = sum(n for k, (n, _) in merged.items() if k.startswith("T"))
+        ts = merged.get("TIME_STOP", (0, 0.0))[0]
+        if ts > tp:
+            print(
+                f"\n  {ts} trades ended on the TIME STOP against {tp} that reached a "
+                f"target.\n  The targets are not being reached inside "
+                f"{settings.scalp.max_hold_minutes} minutes — that is a holding-window\n"
+                f"  or target-distance problem, NOT a win-rate problem, and lowering the\n"
+                f"  score threshold cannot fix it."
+            )
+
     if candidates:
         best_cand = max(c[2] for c in candidates)
         best_seen = max(c[3] for c in candidates)
