@@ -44,6 +44,7 @@ from xauusd.domain.enums import (
 from xauusd.domain.types import Decision, MacroState, NewsState, SymbolSpec
 from xauusd.engine.continuous import ContinuousScanner, ScanOutcome
 from xauusd.engine.pipeline import DecisionPipeline, EngineState, client_tag
+from xauusd.engine.regime_controller import MarketRegimeController, RegimeVerdict
 from xauusd.engine.scalp_pipeline import ScalpPipeline
 from xauusd.execution.broker import Broker, BrokerError
 from xauusd.execution.order_manager import OrderManager
@@ -157,6 +158,10 @@ class TradingEngine:
         # by coincidence.
         self.micro = MicroAnalyzer(settings)
         self.scalp = ScalpPipeline(settings, risk_gate=self.risk_gate)
+        # The layer above both engines (spec §31). One instance, consulted by both, so
+        # the permission is decided once and recorded once rather than each engine
+        # forming its own opinion that nothing can reconcile.
+        self.regime_controller = MarketRegimeController(settings)
         self.scalp_scanner = ContinuousScanner(
             self._scalp_scan,
             interval_seconds=settings.scalp.scan_interval_seconds,
@@ -183,6 +188,8 @@ class TradingEngine:
         self.running = False
         # Loops that died, so `run()` and the CLI can report a crash rather than success.
         self.crashed_loops: list[tuple[str, BaseException]] = []
+        # The most recent engine-permission verdict, for the dashboard and journal.
+        self.last_regime_verdict: RegimeVerdict | None = None
         self.trades_today = 0
         self._last_decision_bar: int | None = None
         self._day: Any = None
@@ -526,6 +533,19 @@ class TradingEngine:
             quote.spread_points(spec.point),
             25.0,
         )
+
+        # §31: the controller may veto this engine outright. Checked before the models
+        # run, not after, because a scan that is not permitted to trade should not spend
+        # the work — and because a rejection with a stated reason is worth more than a
+        # cycle of silent no-candidates.
+        verdict = self.regime_controller.evaluate(snap)
+        self.last_regime_verdict = verdict
+        if self.settings.regime_controller.enabled and not verdict.scalp_allowed:
+            return ScanOutcome(
+                ts=now,
+                duration_ms=int((time.perf_counter() - t0) * 1000),
+                rejections={f"regime:{verdict.why_not('scalp')}": 1},
+            )
 
         cycle = self.scalp.run(
             micro,

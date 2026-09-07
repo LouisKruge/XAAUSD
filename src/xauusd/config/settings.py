@@ -62,6 +62,14 @@ class RiskConfig(ConfigSection):
     max_concurrent_positions: int = Field(1, ge=1, le=5)
     max_trades_per_day: int = Field(3, ge=1, le=20)
     max_consecutive_losses_lockout: int = Field(4, ge=2, le=20)
+    # Spec §15/§16: each engine gets its own aggregate exposure budget and its own daily
+    # drawdown limit, so a scalp losing streak disables SCALPING rather than the account.
+    # These are budgets WITHIN `max_total_open_risk_pct`, never additions to it — the
+    # account cap always binds, and `EngineBudget.may_add` checks both.
+    scalp_aggregate_risk_pct: float = Field(0.02, gt=0, le=0.02)
+    intraday_aggregate_risk_pct: float = Field(0.02, gt=0, le=0.02)
+    scalp_daily_drawdown_pct: float = Field(0.02, gt=0, le=0.10)
+    intraday_daily_drawdown_pct: float = Field(0.02, gt=0, le=0.10)
     drawdown_from_peak: bool = Field(
         True, description="Measure drawdown from period peak equity, not starting equity."
     )
@@ -351,6 +359,27 @@ class ScalpScoreWeights(ConfigSection):
         return self
 
 
+class IntradayConfig(ConfigSection):
+    """The Trend Expansion + Pullback engine (spec §17-§28).
+
+    Deliberately low-frequency. §28: ONE entry per directional setup, and once consumed
+    the engine waits for a NEW expansion rather than adding to the same one — that is
+    what separates it from pyramiding.
+    """
+
+    enabled: bool = False
+    risk_pct: float = Field(0.02, gt=0, le=0.02, description="§18: 2% per trade.")
+    max_concurrent: int = Field(1, ge=1, le=1, description="§28: one at a time, always.")
+    min_rr: float = Field(1.5, ge=1.0, description="§47: INTRADAY_MIN_RR = 1.5.")
+    fallback_target_rr: float = Field(2.0, ge=1.0, le=5.0)
+    # How long an expansion stays a valid setup. Beyond this the move is history, not the
+    # reason price is where it is.
+    setup_max_age_minutes: int = Field(240, ge=15, le=1440)
+    stop_buffer_atr: float = Field(0.25, ge=0, le=2.0)
+    partial_tp_enabled: bool = Field(True, description="§27: 50% at TP1, 50% runner.")
+    partial_tp_fraction: float = Field(0.5, gt=0, lt=1)
+
+
 class RegimeControllerConfig(ConfigSection):
     """Thresholds for the layer that decides which engine may trade (spec §31).
 
@@ -526,6 +555,28 @@ class BrokerConfig(ConfigSection):
     password: str | None = None
     server: str | None = None
     magic: int = 20260831
+    # Spec §36: each engine gets its own magic so MT5 can manage them independently —
+    # a scalp and an intraday position on the same symbol are otherwise indistinguishable
+    # to the terminal, and to any human looking at it. `magic` above stays as the
+    # account-wide identity used for reconciliation, so a position from either engine is
+    # still recognised as ours after a crash.
+    scalp_magic: int = 20260901
+    intraday_magic: int = 20260902
+
+    @model_validator(mode="after")
+    def _magics_are_distinct(self) -> BrokerConfig:
+        """Two engines sharing a magic cannot be told apart, which defeats the point.
+
+        Worse than cosmetic: position accounting per engine (§37) and per-engine
+        drawdown (§16) both key on it, so a collision silently merges two risk budgets.
+        """
+        if len({self.magic, self.scalp_magic, self.intraday_magic}) != 3:
+            raise ValueError(
+                f"magic numbers must be distinct: account={self.magic} "
+                f"scalp={self.scalp_magic} intraday={self.intraday_magic}"
+            )
+        return self
+
     health_timeout_seconds: float = 5.0
     max_health_failures: int = 3
 
@@ -647,6 +698,7 @@ class Settings(BaseSettings):
     scalp: ScalpConfig = Field(default_factory=ScalpConfig)
     scalp_score: ScalpScoreWeights = Field(default_factory=ScalpScoreWeights)
     regime_controller: RegimeControllerConfig = Field(default_factory=RegimeControllerConfig)
+    intraday: IntradayConfig = Field(default_factory=IntradayConfig)
     liquidity: LiquidityConfig = Field(default_factory=LiquidityConfig)
     fvg: FVGConfig = Field(default_factory=FVGConfig)
     order_block: OrderBlockConfig = Field(default_factory=OrderBlockConfig)
@@ -711,6 +763,26 @@ class Settings(BaseSettings):
         if strategy and strategy.startswith("scalp"):
             return max(1, round(self.scalp.max_hold_minutes * 60 / max(bar_seconds, 1)))
         return self.execution.time_stop_bars
+
+    def engine_risk_limit(self, engine: str) -> float:
+        """The aggregate open-risk budget for one engine (spec §15).
+
+        One mapping from engine name to limit. Two would be two things to keep in step,
+        which is the defect class this project has hit eleven times.
+        """
+        return (
+            self.risk.scalp_aggregate_risk_pct
+            if engine == "scalp"
+            else self.risk.intraday_aggregate_risk_pct
+        )
+
+    def engine_daily_drawdown_limit(self, engine: str) -> float:
+        """The daily realised-loss limit that disables one engine (spec §16)."""
+        return (
+            self.risk.scalp_daily_drawdown_pct
+            if engine == "scalp"
+            else self.risk.intraday_daily_drawdown_pct
+        )
 
     def reachable_target_distance(self, atr: float) -> float | None:
         """The furthest a scalp target can sit and still be reached in the window.
