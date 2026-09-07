@@ -100,6 +100,12 @@ class Classification(StrEnum):
     # it has its own score, its own gates and its own risk fraction, and mixing it
     # into the A ladder would let a scalp inherit an A's 1% by accident.
     SCALP = "SCALP"
+    # The Trend Expansion + Pullback tier (spec §17-§28). Separate for the same reason
+    # SCALP is: its own risk fraction (§18), its own RR floor (§47) and its own daily
+    # drawdown budget (§16). Folding it into A_PLUS would make every intraday trade
+    # inherit the A+ ladder's caps and make the two indistinguishable in the journal,
+    # which is precisely the per-engine reporting §30 asks for.
+    INTRADAY = "INTRADAY"
 
 
 class StructureKind(StrEnum):

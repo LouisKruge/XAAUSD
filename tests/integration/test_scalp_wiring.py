@@ -151,30 +151,50 @@ class TestTheSharedCapsStillBind:
         _, executed = run_all(ScalpPipeline(settings(), risk_gate=gate), market_state)
         assert not executed, "the kill switch must stop scalps as it stops A/A+ trades"
 
-    def test_being_at_max_concurrent_skips_the_scan_entirely(self, market_state) -> None:
+    @staticmethod
+    def _position(magic: int, ticket: int = 1) -> object:
         from xauusd.domain.types import BrokerPosition
 
-        open_pos = [
-            BrokerPosition(
-                ticket=1,
-                symbol="XAUUSD",
-                direction=Direction.LONG,
-                volume=0.1,
-                entry_price=2600.0,
-                stop_loss=2590.0,
-                take_profit=2620.0,
-                opened_at=datetime.now(UTC),
-                magic=1,
-                comment="x:t",
-            )
-        ]
-        pipeline = ScalpPipeline(settings(max_concurrent=1))
+        return BrokerPosition(
+            ticket=ticket,
+            symbol="XAUUSD",
+            direction=Direction.LONG,
+            volume=0.1,
+            entry_price=2600.0,
+            stop_loss=2590.0,
+            take_profit=2620.0,
+            opened_at=datetime.now(UTC),
+            magic=magic,
+            comment="x:t",
+        )
+
+    def test_being_at_max_concurrent_skips_the_scan_entirely(self, market_state) -> None:
+        cfg = settings(max_concurrent=1)
+        open_pos = [self._position(cfg.broker.scalp_magic)]
+        pipeline = ScalpPipeline(cfg)
         now, micro, snap = market_state[0]
         cycle = pipeline.run(
             micro, snap, account=account(), spec=SPEC, now=now, open_positions=open_pos
         )
         assert cycle.skipped and "max concurrent" in cycle.skipped
         assert not cycle.evaluations, "no model should even run when the book is full"
+
+    def test_another_engines_position_is_not_this_engines_concurrency(self, market_state) -> None:
+        """§15 gives each engine its own budget, and that has to cut both ways.
+
+        An open INTRADAY trade must not read as "the scalp engine is full": the scalp
+        engine would stop scanning for a reason that has nothing to do with it, and the
+        per-engine budgets would have bought nothing. The account-wide bounds still
+        apply — they are enforced in RiskGate, not by refusing to look.
+        """
+        cfg = settings(max_concurrent=1)
+        open_pos = [self._position(cfg.broker.intraday_magic)]
+        pipeline = ScalpPipeline(cfg)
+        now, micro, snap = market_state[0]
+        cycle = pipeline.run(
+            micro, snap, account=account(), spec=SPEC, now=now, open_positions=open_pos
+        )
+        assert cycle.skipped is None or "max concurrent" not in cycle.skipped
 
 
 class TestNothingRunsUntilItIsTurnedOn:

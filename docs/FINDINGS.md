@@ -1340,3 +1340,120 @@ answer on real history.
 refusing four signals in five for a bad reason. Whether what remains has positive
 expectancy after costs is untested, and a fix that raises trade supply is exactly the
 kind that must be validated out-of-sample before it is trusted.
+
+## 42. The account-wide open-risk cap was raised from 2% to 5%, on operator authority
+
+This is not a defect note. It is the record of the only time a risk invariant in this
+system has been *raised*, and it exists so nobody later has to reconstruct why from a
+diff.
+
+### What changed
+
+| | before | after |
+|---|---|---|
+| `risk.max_total_open_risk_pct` — account-wide aggregate | 2% (`le=0.06`) | **5%** (`le=0.05`) |
+| `risk.max_concurrent_positions` — account-wide | 1 | 2 |
+| `risk.scalp_aggregate_risk_pct` | 2% | 1.5% |
+| `risk.intraday_aggregate_risk_pct` | 2% | 2% |
+| `risk.global_risk_cap_pct` — **per trade** | 2% | **2%, unchanged** |
+| `risk.risk_pct_a_plus` — **per trade** | 2% | **2%, unchanged** |
+
+The raised number is the *aggregate*: the total that would be lost if every open
+position hit its stop at the same time. No single trade may risk more than it ever
+could. That distinction is the whole content of the change, and both halves are now
+asserted in `tests/unit/test_config.py` so "raise the cap to 5%" cannot quietly become
+"let one trade risk 5%".
+
+A 5% per-trade cap would also be internally incoherent: `_check_ordering` requires that
+a single A+ trade cannot risk more than the daily drawdown limit, which is 2%. Raising
+the per-trade cap would have required raising the daily drawdown limit too — a much
+larger change that was not asked for and was not made.
+
+### Why it was needed
+
+The dual-engine design (spec §15) gives each engine its own aggregate budget: scalp
+0.5% × 3 = 1.5%, intraday 2% = 3.5% between them. Under a 2% account cap those budgets
+could never both be used — the account cap bound first, so an open intraday trade paused
+scalping entirely and the per-engine budgets bought nothing. The engines were designed to
+run together and the account cap made that impossible.
+
+### What was *not* relaxed
+
+The ceiling on the field is now exactly the authorised figure (`le=0.05`, down from
+`le=0.06`), so configuration cannot drift above it, and two new validator rules were
+added rather than removed:
+
+* the per-trade cap may not exceed the account-wide cap — otherwise one trade could
+  breach the total on its own and the total would mean nothing;
+* neither engine may be budgeted more than the account may carry — a budget that can
+  never bind reads as permission the engine does not have.
+
+The account cap still binds *before* any engine budget in `EngineBudget.may_add`, which
+is what keeps "per-engine budgets" from becoming permission to carry their sum.
+
+## 43. `no_stacking` had to learn what two engines means, without learning less
+
+Raising the aggregate cap is pointless if nothing may be open twice, and `no_stacking`
+refused any second position on the symbol. Both engines trade XAUUSD, so with the rule
+as written the intraday engine could never open while a scalp was live and vice versa —
+the wiring would have been decorative.
+
+The rule being enforced is *no averaging and no hedging*. Neither half was weakened:
+
+* a second position from the **same engine** is averaging, and is refused;
+* an **opposite-direction** position from any engine is a hedge, and is refused;
+* a position belonging to **no engine of ours** — a manual trade, another EA — blocks
+  too, because we cannot see its stop, its size or its intent.
+
+What became possible is one scalp and one intraday position in the same direction: two
+independent hypotheses with their own stops, bounded by the per-engine budgets and the
+account cap rather than by a check that cannot tell them apart.
+
+Two details matter more than the rule itself.
+
+**It is stated as what is allowed, not what is blocked.** `tolerated()` returns True only
+for a known other engine facing the same way; everything else blocks. An unforeseen owner
+therefore blocks by default, which is the direction a risk check should fail in.
+
+**It is opt-in.** A caller that does not name an engine keeps the original absolute rule
+exactly. No existing path inherited a weaker check by being nearby, and
+`test_an_unnamed_caller_keeps_the_original_absolute_rule` pins that.
+
+## 44. The intraday engine was the twelfth thing built and connected to nothing
+
+`ExpansionPullbackEngine` shipped fully written and fully tested, and decided nothing:
+no pipeline consulted it, no runner constructed it. It was flagged as such when it was
+committed rather than discovered later, which is the only reason this entry is short.
+
+Wiring it needed five joins, and four of them are the same defect class this file keeps
+recording — one rule with several enforcement points, where the newest path never learned
+it:
+
+1. **Magic numbers.** `scalp_magic` and `intraday_magic` existed and only `EngineBudget`
+   read them; every position was still stamped with `broker.magic`, so engine attribution
+   was arithmetic on a field nothing set. `Settings.engine_magic` is now the single
+   mapping, used by the executor that stamps and by everything that later claims.
+2. **The reconciler knew one magic.** With two engines it would have raised
+   `UNTAGGED_POSITION` — CRITICAL, "a human is trading this account, exposure cannot be
+   trusted" — about our own intraday trade. It now takes `owned_magics()`.
+3. **`broker.positions(magic=...)` filters to one magic.** Asking for the account magic
+   alone would have hidden intraday positions from exposure, from the concurrency check,
+   and from FLATTEN — which would have reported the account flat with a trade still open.
+4. **The regime controller was wired live but not into the backtester.** Same asymmetry
+   as FINDINGS 38, in the more dangerous direction: validation numbers would describe a
+   system that is not the one trading. Both runners now consult it, for both engines.
+5. **`consume()` on the fill, never on the decision.** §28 retires a setup once a trade
+   has been *taken*. Consuming on the decision would silently retire setups whose order
+   the broker refused.
+
+`tests/integration/test_intraday_wiring.py` asserts both runners construct it, run it and
+consume on a fill, and — the test that would actually have caught the original problem —
+that a complete setup can travel the whole distance and come out as a sized order.
+
+### What this does not say
+
+The engine takes trades. On synthetic data it took two in four weeks and lost both,
+which is what a random walk should do and is not evidence of anything. It ships
+`enabled: false` and DEV, every scalp parameter changed underneath it in the same work,
+and no out-of-sample validation on real history has been run against any of it. Nothing
+here is a claim about profitability.

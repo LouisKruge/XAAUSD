@@ -65,12 +65,26 @@ class Reconciler:
         broker: Any,
         kill_switch: KillSwitch,
         notifier: Notifier | None = None,
-        magic: int = 0,
+        magic: int | None = 0,
+        magics: frozenset[int] | set[int] | None = None,
     ) -> None:
         self.broker = broker
         self.kill_switch = kill_switch
         self.notifier = notifier or Notifier()
-        self.magic = magic
+        # Every magic this system may hold a position under (spec §36). Two engines
+        # means two magics, and a reconciler that knows only one would classify a live
+        # intraday position as UNTAGGED_POSITION — a CRITICAL divergence saying a human
+        # is trading the account, raised about our own trade. `magic` stays for the
+        # single-magic callers and is folded in.
+        self._primary = magic or 0
+        self.magics: frozenset[int] = frozenset(magics or ()) | (
+            frozenset({magic}) if magic is not None else frozenset()
+        )
+
+    @property
+    def magic(self) -> int:
+        """The primary magic. Kept so callers and tests that ask for one still can."""
+        return self._primary
 
     def reconcile(
         self,
@@ -104,7 +118,7 @@ class Reconciler:
         for ticket, pos in by_ticket.items():
             if ticket in db_by_ticket:
                 continue
-            ours = pos.magic == self.magic
+            ours = pos.magic in self.magics
             if ours and adopt_orphans:
                 result.adopted.append(ticket)
                 result.divergences.append(

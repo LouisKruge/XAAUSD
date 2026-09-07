@@ -84,6 +84,7 @@ class RiskGate:
             Classification.A_PLUS: r.risk_pct_a_plus,
             Classification.A: r.risk_pct_a,
             Classification.SCALP: self.settings.scalp.risk_pct,
+            Classification.INTRADAY: self.settings.intraday.risk_pct,
             Classification.NO_TRADE: 0.0,
         }[classification]
 
@@ -98,6 +99,20 @@ class RiskGate:
         if confidence is not None:
             caps["confidence_scaled"] = class_cap * max(0.5, min(1.0, confidence))
         return min(caps.values()), caps
+
+    def _engine_of(self, position: BrokerPosition) -> str:
+        """Which engine owns a position, by its magic number (spec §36).
+
+        Deliberately reads the SAME mapping the executor stamps with. Two mappings would
+        be two things to keep in step, and the failure mode is a position no engine
+        claims — which reads as "not ours" and would be refused, or worse, closed.
+        """
+        b = self.settings.broker
+        if position.magic == b.scalp_magic:
+            return "scalp"
+        if position.magic == b.intraday_magic:
+            return "intraday"
+        return ""
 
     # -- the gate ----------------------------------------------------------------------
 
@@ -115,6 +130,7 @@ class RiskGate:
         broker_calc_margin: float | None = None,
         fx_rate_to_account: float = 1.0,
         confidence: float | None = None,
+        engine: str = "",
     ) -> RiskDecision:
         r = self.settings.risk
         checks: list[GateResult] = []
@@ -174,14 +190,45 @@ class RiskGate:
 
         # Never add to, or hedge, an existing position on the same symbol. The absence
         # of an averaging path in the Broker interface makes this belt-and-braces.
+        #
+        # `engine` is what makes this survive two engines trading one symbol. The rule
+        # being enforced is "no averaging and no hedging", and BOTH halves stay absolute:
+        #
+        #   * a second position from the SAME engine is averaging, and is refused;
+        #   * an OPPOSITE-direction position from any engine is a hedge, and is refused.
+        #
+        # What becomes possible is a scalp and an intraday position in the same
+        # direction — which is the dual-engine design (spec §15), not stacking: they are
+        # two independent hypotheses, each with its own stop, and their combined size is
+        # bounded by the per-engine budgets and the account-wide open-risk cap rather
+        # than by this check. An unattributed caller (engine == "") keeps the original
+        # behaviour: any open position on the symbol refuses. The relaxation is opt-in
+        # and has to be asked for by name.
         same_symbol = [p for p in positions if p.symbol == plan.symbol_hint()]
+        if engine:
+            # Stated as what is ALLOWED, so anything unforeseen blocks by default: a
+            # position belonging to the OTHER known engine, facing the same way. A
+            # position belonging to no engine of ours — a manual trade, another EA —
+            # is not "the other engine's" and blocks, because we cannot reason about a
+            # stranger's stop, size or intent.
+            def tolerated(p: BrokerPosition) -> bool:
+                owner = self._engine_of(p)
+                return bool(owner) and owner != engine and p.direction is plan.direction
+
+            blocking = [p for p in same_symbol if not tolerated(p)]
+            requirement = f"no existing {engine} position and nothing facing the other way"
+            detail = "never average into an engine's own position, and never hedge"
+        else:
+            blocking = same_symbol
+            requirement = "no existing position"
+            detail = "never average into or hedge an existing position"
         checks.append(
             GateResult(
                 "risk.no_stacking",
-                not same_symbol,
-                [p.ticket for p in same_symbol] or "none",
-                "no existing position",
-                detail="never average into or hedge an existing position",
+                not blocking,
+                [p.ticket for p in blocking] or "none",
+                requirement,
+                detail=detail,
             )
         )
 

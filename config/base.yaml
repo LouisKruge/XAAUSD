@@ -60,6 +60,20 @@ scalp:
   # mismatch that made targets unreachable.
   max_stop_atr: 1.4
 
+intraday:
+  # The Trend Expansion + Pullback engine (spec §17-§28). ON here for paper, exactly as
+  # the scalp engine is: the CODE default stays False so nothing inherits it by
+  # accident, and LIVE mode still refuses to route it until the model has passed
+  # out-of-sample validation (`intraday_strategy_validated`). Turning this on does not
+  # arm anything.
+  enabled: true
+  risk_pct: 0.02          # §18
+  max_concurrent: 1       # §28 — one entry per setup, one position at a time
+  min_rr: 1.5             # §47 INTRADAY_MIN_RR
+  fallback_target_rr: 2.0
+  setup_max_age_minutes: 240
+  stop_buffer_atr: 0.25
+
 risk:
   risk_pct_a: 0.01
   risk_pct_a_plus: 0.02
@@ -67,8 +81,18 @@ risk:
   max_daily_drawdown_pct: 0.02
   max_weekly_drawdown_pct: 0.05
   max_monthly_drawdown_pct: 0.10
-  max_total_open_risk_pct: 0.02
-  max_concurrent_positions: 1
+  # ACCOUNT-WIDE aggregate open risk: what would be lost if every open position hit
+  # its stop at once. Raised from 2% to 5% on operator authority (2026-09-07) so the
+  # scalp and intraday engines can hold positions at the same time. The PER-TRADE cap
+  # above stays at 2%.
+  max_total_open_risk_pct: 0.05
+  # One position per engine.
+  max_concurrent_positions: 2
+  # Budgets WITHIN the account cap, never additions to it (spec §15).
+  scalp_aggregate_risk_pct: 0.015
+  intraday_aggregate_risk_pct: 0.02
+  scalp_daily_drawdown_pct: 0.02
+  intraday_daily_drawdown_pct: 0.02
   max_trades_per_day: 3
   max_consecutive_losses_lockout: 4
   drawdown_from_peak: true

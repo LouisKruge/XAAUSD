@@ -148,7 +148,12 @@ class ScalpPipeline:
         if not micro.usable:
             cycle.skipped = f"micro data unusable: {', '.join(micro.degraded) or 'warming up'}"
             return cycle
-        if len(positions) >= self.cfg.max_concurrent:
+        # This engine's OWN positions. Counting the account's would let one intraday
+        # trade look like a scalp at its concurrency limit, and the scalp engine would
+        # stop scanning for a reason that has nothing to do with it. The account-wide
+        # bound is `risk.max_concurrent_positions` and the RiskGate still applies it.
+        mine = [p for p in positions if p.magic == self.settings.broker.scalp_magic]
+        if len(mine) >= self.cfg.max_concurrent:
             cycle.skipped = f"at max concurrent ({self.cfg.max_concurrent})"
             return cycle
 
@@ -362,6 +367,11 @@ class ScalpPipeline:
             open_risk_pct=open_risk_pct,
             trades_today=trades_today,
             broker_calc_profit=self._broker_loss_for_one_lot(calc_profit, signal),
+            # Named so `no_stacking` judges this against the SCALP engine's own
+            # positions and against anything facing the other way, rather than against
+            # every position on the account. See RiskGate for why that is still the
+            # same rule and not a relaxed one.
+            engine="scalp",
         )
         ev.checks.extend(decision.checks)
         ev.plan = plan

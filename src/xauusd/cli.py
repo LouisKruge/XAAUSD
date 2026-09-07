@@ -109,6 +109,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"{settings.risk.max_weekly_drawdown_pct:.1%} / "
         f"{settings.risk.max_monthly_drawdown_pct:.1%}"
     )
+    print(
+        f"open risk cap    : {settings.risk.max_total_open_risk_pct:.2%} account-wide, "
+        f"{settings.risk.max_concurrent_positions} position(s)  "
+        f"[scalp {settings.risk.scalp_aggregate_risk_pct:.2%} / "
+        f"intraday {settings.risk.intraday_aggregate_risk_pct:.2%}]"
+    )
+    print(
+        f"engines          : scalp {'on' if settings.scalp.enabled else 'off'}, "
+        f"intraday {'on' if settings.intraday.enabled else 'off'}"
+    )
     print(f"min RR           : {settings.thresholds.min_rr}")
 
     # Say plainly whether .env was found and used. Its absence was the failure that
@@ -756,6 +766,10 @@ def cmd_arm_live(args: argparse.Namespace) -> int:
     print()
     print(f"Account number to arm: {args.account}")
     print(f"Global risk cap      : {settings.risk.global_risk_cap_pct:.3%} per trade")
+    print(
+        f"Account-wide cap     : {settings.risk.max_total_open_risk_pct:.3%} "
+        f"across every open position"
+    )
     print()
     confirm = input("Type the account number again to confirm: ").strip()
     if confirm != str(args.account):

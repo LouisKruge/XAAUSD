@@ -29,6 +29,14 @@ class TestRiskConfig:
             {"max_daily_drawdown_pct": 0.06, "max_weekly_drawdown_pct": 0.05},
             {"risk_pct_a_plus": 0.02, "max_daily_drawdown_pct": 0.015},
             {"max_concurrent_positions": 0},
+            # The account-wide cap is 5% and nothing may configure above it.
+            {"max_total_open_risk_pct": 0.06},
+            # A per-trade cap above the account cap would let one trade breach the
+            # total on its own, which makes the total meaningless.
+            {"global_risk_cap_pct": 0.02, "max_total_open_risk_pct": 0.01},
+            # An engine budgeted more than the account may carry is a budget that can
+            # never bind, and reads as permission the engine does not have.
+            {"intraday_aggregate_risk_pct": 0.04, "max_total_open_risk_pct": 0.03},
         ],
     )
     def test_rejects_unsafe(self, kwargs: dict) -> None:
@@ -44,7 +52,21 @@ class TestRiskConfig:
         assert r.max_daily_drawdown_pct == 0.02
         assert r.max_weekly_drawdown_pct == 0.05
         assert r.max_monthly_drawdown_pct == 0.10
-        assert r.max_total_open_risk_pct == 0.02
+        # OPERATOR-AUTHORISED, 2026-09-07: raised from 2% to 5%. This is the ACCOUNT-WIDE
+        # aggregate — the total that would be lost if every open position hit its stop
+        # at once — and it was raised so the scalp and intraday engines can hold
+        # positions simultaneously (§15). It is asserted here, rather than left to drift,
+        # because it is the only risk number in this system that has ever been raised.
+        assert r.max_total_open_risk_pct == 0.05
+        # The PER-TRADE cap is UNCHANGED. No single trade may risk more than 2%, and
+        # this assertion is what stops "raise the cap to 5%" from quietly becoming that.
+        assert r.global_risk_cap_pct == 0.02
+        assert r.risk_pct_a_plus == 0.02
+        # Engine budgets live inside the account cap and do not sum to it: the account
+        # cap always has headroom over both engines fully loaded.
+        assert r.scalp_aggregate_risk_pct + r.intraday_aggregate_risk_pct <= (
+            r.max_total_open_risk_pct
+        )
 
     def test_is_immutable(self) -> None:
         r = RiskConfig()

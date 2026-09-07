@@ -43,6 +43,7 @@ from xauusd.domain.enums import (
 )
 from xauusd.domain.types import Decision, MacroState, NewsState, SymbolSpec
 from xauusd.engine.continuous import ContinuousScanner, ScanOutcome
+from xauusd.engine.intraday_pipeline import IntradayCycle, IntradayPipeline
 from xauusd.engine.pipeline import DecisionPipeline, EngineState, client_tag
 from xauusd.engine.regime_controller import MarketRegimeController, RegimeVerdict
 from xauusd.engine.scalp_pipeline import ScalpPipeline
@@ -56,6 +57,7 @@ from xauusd.monitoring.health import HealthRegistry
 from xauusd.monitoring.logging import cycle_context, get_logger
 from xauusd.risk.correlation import OpenExposure
 from xauusd.risk.drawdown import DrawdownGuard
+from xauusd.risk.engine_budget import EngineBudget
 from xauusd.risk.gate import RiskGate
 from xauusd.risk.kill_switch import KillSwitch
 
@@ -158,6 +160,17 @@ class TradingEngine:
         # by coincidence.
         self.micro = MicroAnalyzer(settings)
         self.scalp = ScalpPipeline(settings, risk_gate=self.risk_gate)
+        # Per-engine budgets (§15, §16). One instance shared by both engines, because
+        # the daily drawdown counter is state: two instances would each see half the
+        # closes and neither would ever reach a limit.
+        self.engine_budget = EngineBudget(settings)
+        # The intraday engine, on the SAME risk gate as everything else. It runs inside
+        # the M5 decision cycle rather than on its own loop: its trigger timeframe IS M5
+        # (§24), so a separate cadence would evaluate the same bar repeatedly and give
+        # the ordered sequence several chances to find the same setup.
+        self.intraday = IntradayPipeline(
+            settings, risk_gate=self.risk_gate, budget=self.engine_budget
+        )
         # The layer above both engines (spec §31). One instance, consulted by both, so
         # the permission is decided once and recorded once rather than each engine
         # forming its own opinion that nothing can reconcile.
@@ -176,7 +189,13 @@ class TradingEngine:
             broker, settings, self.kill_switch, self.notifier, persist=self._persist_order
         )
         self.positions = PositionManager(broker, settings)
-        self.reconciler = Reconciler(broker, self.kill_switch, self.notifier, settings.broker.magic)
+        self.reconciler = Reconciler(
+            broker,
+            self.kill_switch,
+            self.notifier,
+            settings.broker.magic,
+            magics=settings.owned_magics(),
+        )
         self.clock = BrokerClock()
         self.sessions = SessionEngine(settings.session, self.clock)
         self.context = ContextCache()
@@ -190,6 +209,8 @@ class TradingEngine:
         self.crashed_loops: list[tuple[str, BaseException]] = []
         # The most recent engine-permission verdict, for the dashboard and journal.
         self.last_regime_verdict: RegimeVerdict | None = None
+        # The most recent intraday cycle, for the dashboard and the journal.
+        self.last_intraday_cycle: IntradayCycle | None = None
         self.trades_today = 0
         self._last_decision_bar: int | None = None
         self._day: Any = None
@@ -462,7 +483,7 @@ class TradingEngine:
         source = _BrokerBarSource(self.broker, self.settings)
         view = MarketView(source, self.symbol, now, quote)
 
-        positions = self.broker.positions(magic=self.settings.broker.magic)
+        positions = self._our_positions()
         state = EngineState(
             account=account,
             spec=spec,
@@ -495,7 +516,90 @@ class TradingEngine:
         if result.executable is not None:
             self._execute(result.executable, spec, now)
 
+        # The intraday engine, on the same M5 close (§24: M5 is its trigger timeframe).
+        # It runs AFTER the A/A+ path and re-reads positions, so if the A+ trade above
+        # just opened one, the intraday budget and concurrency checks see it.
+        self._intraday_cycle(result.snapshot, account, spec, now)
+
         self.health.report("engine", True, int((time.perf_counter() - t0) * 1000))
+
+    def _intraday_cycle(self, snap, account, spec, now: datetime) -> None:  # type: ignore[no-untyped-def]
+        """One pass of the Trend Expansion + Pullback engine (spec §17-§28)."""
+        if not self.settings.intraday.enabled:
+            return
+
+        # §31: the controller may veto this engine outright. Checked before the sequence
+        # runs — but the verdict is RECORDED either way, so "the intraday engine was not
+        # permitted to trade" is a journalled reason rather than a silent quiet spell.
+        verdict = self.regime_controller.evaluate(snap)
+        self.last_regime_verdict = verdict
+        if self.settings.regime_controller.enabled and not verdict.intraday_allowed:
+            log.info("intraday_blocked_by_regime", reason=verdict.why_not("intraday"))
+            return
+
+        positions = self._our_positions()
+        try:
+            cycle = self.intraday.run(
+                snap,
+                account=account,
+                spec=spec,
+                now=now,
+                open_positions=positions,
+                open_risk_pct=self._open_risk(positions, account.equity, spec),
+                trades_today=self.trades_today,
+                strategy_status=self._strategy_status(),
+                calc_profit=lambda direction, entry, stop: self.broker.calc_profit(
+                    self.symbol, direction, 1.0, entry, stop
+                ),
+            )
+        except Exception as exc:
+            log.error("intraday_cycle_failed", error=f"{type(exc).__name__}: {exc}")
+            return
+
+        self.last_intraday_cycle = cycle
+        self._persist_intraday(cycle)
+        if not (cycle.approved and cycle.plan is not None):
+            return
+
+        opened = self._execute(
+            self._intraday_decision(cycle, now),
+            spec,
+            now,
+            magic=self.settings.engine_magic("intraday"),
+        )
+        # §28: one entry per setup — but only once one was actually TAKEN. Consuming on
+        # the decision rather than on the fill would retire a setup the broker refused,
+        # so a rejected order would silently cost the trade the setup was for.
+        if opened:
+            self.intraday.consume()
+
+    def _intraday_decision(self, cycle, now: datetime) -> Decision:  # type: ignore[no-untyped-def]
+        """One intraday cycle as a journal entry, traded or not."""
+        return Decision(
+            ts=now,
+            symbol=self.symbol,
+            classification=(Classification.INTRADAY if cycle.approved else Classification.NO_TRADE),
+            mode=str(self.settings.mode),
+            plan=cycle.plan,
+            score=0.0,
+            gates=tuple(cycle.checks),
+            reasons_against=(
+                () if cycle.approved else (cycle.rejected_by or cycle.skipped or "unknown",)
+            ),
+            config_hash=self.settings.config_hash(),
+            git_sha=self.pipeline.git_sha,
+        )
+
+    def _persist_intraday(self, cycle) -> None:  # type: ignore[no-untyped-def]
+        """Journal the cycle whether or not it traded. Never let a write stop trading."""
+        if cycle.skipped and cycle.evaluation is None and not cycle.checks:
+            return
+        try:
+            with self.db.session() as s:
+                Repositories(s).decisions.save(self._intraday_decision(cycle, cycle.ts))
+                s.commit()
+        except Exception as exc:
+            log.error("intraday_persist_failed", error=f"{type(exc).__name__}: {exc}")
 
     def _scalp_scan(self) -> ScanOutcome:
         """One continuous-scan pass. Runs off the M5 cycle, on its own cadence.
@@ -515,7 +619,7 @@ class TradingEngine:
             account = self.broker.account()
             quote = self.broker.quote(self.symbol)
             spec = self.broker.symbol_spec(self.symbol)
-            positions = self.broker.positions(magic=self.settings.broker.magic)
+            positions = self._our_positions()
         except BrokerError as exc:
             return ScanOutcome(
                 ts=now,
@@ -627,17 +731,28 @@ class TradingEngine:
         except Exception as exc:
             log.error("scalp_persist_failed", error=f"{type(exc).__name__}: {exc}")
 
-    def _execute_scalp(self, ev, spec, now: datetime) -> None:  # type: ignore[no-untyped-def]
+    def _execute_scalp(self, ev, spec, now: datetime) -> bool:  # type: ignore[no-untyped-def]
         """Route an approved scalp through the SAME execution path as an A/A+ trade."""
-        self._execute(self._scalp_decision(ev, now), spec, now)
+        return self._execute(
+            self._scalp_decision(ev, now), spec, now, magic=self.settings.engine_magic("scalp")
+        )
 
-    def _execute(self, decision, spec, now: datetime) -> None:  # type: ignore[no-untyped-def]
+    def _execute(self, decision, spec, now: datetime, magic: int | None = None) -> bool:  # type: ignore[no-untyped-def]
+        """Send one decision. Returns whether a position was actually opened.
+
+        The magic is the engine's (spec §36), and it is the SAME number `_our_positions`
+        and the reconciler recognise — `Settings.engine_magic` is the one mapping, so
+        the thing that stamps a position and the things that later claim it cannot
+        disagree. A position no component claims is an orphan the reconciler would
+        report as a stranger on the account.
+        """
+        magic = self.settings.broker.magic if magic is None else magic
         tag = client_tag(decision.plan)
-        outcome = self.orders.execute(decision, tag, spec, now, self.settings.broker.magic)
+        outcome = self.orders.execute(decision, tag, spec, now, magic)
         log.info("execution_outcome", **{"outcome": outcome.log_line()})
         if outcome.ok and outcome.ticket:
             self.trades_today += 1
-            for p in self.broker.positions(magic=self.settings.broker.magic):
+            for p in self.broker.positions(magic=magic):
                 if p.ticket == outcome.ticket:
                     self.positions.adopt(outcome.ticket, decision.plan, p)
                     break
@@ -648,6 +763,8 @@ class TradingEngine:
                 rr=round(decision.plan.rr, 2),
                 score=decision.score,
             )
+            return True
+        return False
 
     async def _reconcile_loop(self) -> None:
         interval = self.settings.execution.reconcile_interval_seconds
@@ -732,7 +849,7 @@ class TradingEngine:
                 {"operator": operator},
                 now,
             )
-            positions = self.broker.positions(magic=self.settings.broker.magic)
+            positions = self._our_positions()
             closed: list[int] = []
             failed: list[int] = []
             for p in positions:
@@ -800,6 +917,17 @@ class TradingEngine:
         self.context = ContextCache(macro, news, now)
 
     # -- helpers -----------------------------------------------------------------------
+
+    def _our_positions(self) -> list[Any]:
+        """Every position this system holds, across both engines' magics (spec §36).
+
+        `broker.positions(magic=...)` filters to ONE magic. Asking for the account magic
+        alone once the intraday engine exists would hide its positions from exposure,
+        from the concurrency check and — worst of the three — from FLATTEN, which would
+        report the account flat while an intraday trade was still open.
+        """
+        magics = self.settings.owned_magics()
+        return [p for p in self.broker.positions(magic=None) if p.magic in magics]
 
     def _open_risk(self, positions, equity: float, spec) -> float:  # type: ignore[no-untyped-def]
         if not positions or equity <= 0:

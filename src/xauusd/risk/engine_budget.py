@@ -175,6 +175,21 @@ class EngineBudget:
                 f"so open risk cannot be measured — refusing to add more",
             )
 
+        # §28 for intraday, `scalp.max_concurrent` for scalp. A count, unlike the
+        # money check above, and it is a SECOND limit rather than a substitute: risk is
+        # money (§37), but "one entry per setup" is a count and cannot be expressed in
+        # money at all.
+        max_positions = cfg.engine_max_positions(engine)
+        if current.positions >= max_positions:
+            return BudgetVerdict(
+                False,
+                engine,
+                would_be,
+                cfg.engine_risk_limit(engine),
+                f"{engine} already holds {current.positions} position(s), its limit of "
+                f"{max_positions}",
+            )
+
         limit = cfg.engine_risk_limit(engine)
         if would_be > limit:
             return BudgetVerdict(

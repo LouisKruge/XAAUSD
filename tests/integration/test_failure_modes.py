@@ -246,3 +246,58 @@ class TestRestartRecovery:
         # Nothing may be adopted from an empty broker, and the discrepancy must be
         # represented rather than the stale record being trusted.
         assert 4242 not in result.adopted
+
+
+class TestTheReconcilerKnowsEveryEngineIsOurs:
+    """A reconciler that knows one magic, with two engines trading, is a reconciler
+    that raises CRITICAL "a human is trading this account" about our own position.
+
+    That divergence is not cosmetic: UNTAGGED_POSITION says exposure and risk cannot be
+    trusted, and it says it about a trade the intraday engine opened two minutes ago.
+    """
+
+    @staticmethod
+    def _position(magic: int, ticket: int = 5150):  # type: ignore[no-untyped-def]
+        from xauusd.domain.types import BrokerPosition
+
+        return BrokerPosition(
+            ticket=ticket,
+            symbol="GOLD",
+            direction=Direction.LONG,
+            volume=0.05,
+            entry_price=2000.0,
+            stop_loss=1995.0,
+            take_profit=2010.0,
+            opened_at=datetime.now(UTC),
+            magic=magic,
+            comment="xauusd:abc123",
+        )
+
+    def _reconcile(self, position):  # type: ignore[no-untyped-def]
+        from xauusd.config.settings import Settings
+        from xauusd.execution.reconciler import Reconciler
+        from xauusd.risk.kill_switch import KillSwitch
+
+        class _Broker:
+            def positions(self, magic=None, symbol=None):  # type: ignore[no-untyped-def]
+                return [position]
+
+        s = Settings()
+        rec = Reconciler(_Broker(), KillSwitch(), None, s.broker.magic, magics=s.owned_magics())
+        return rec.reconcile(db_positions=[], adopt_orphans=True)
+
+    @pytest.mark.parametrize("engine", ["", "scalp", "intraday"])
+    def test_every_engines_position_is_recognised_as_ours(self, engine: str) -> None:
+        from xauusd.config.settings import Settings
+
+        magic = Settings().engine_magic(engine)
+        result = self._reconcile(self._position(magic))
+        assert 5150 in result.adopted, f"a position with the {engine or 'account'} magic is ours"
+        assert not any(d.kind == "UNTAGGED_POSITION" for d in result.divergences)
+
+    def test_a_genuinely_foreign_position_is_still_critical(self) -> None:
+        """The relaxation must not have swallowed the case the check exists for."""
+        result = self._reconcile(self._position(424242))
+        assert 5150 not in result.adopted
+        assert any(d.kind == "UNTAGGED_POSITION" for d in result.divergences)
+        assert any(d.severity == "CRITICAL" for d in result.divergences)

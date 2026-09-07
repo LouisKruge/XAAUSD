@@ -49,13 +49,16 @@ from xauusd.domain.types import (
     Quote,
     SymbolSpec,
 )
+from xauusd.engine.intraday_pipeline import IntradayPipeline
 from xauusd.engine.pipeline import DecisionPipeline, EngineState, client_tag
+from xauusd.engine.regime_controller import MarketRegimeController
 from xauusd.engine.scalp_pipeline import ScalpPipeline
 from xauusd.execution.broker import BrokerHealth
 from xauusd.execution.sim_broker import SimBroker, SimFillModel
 from xauusd.monitoring.logging import get_logger
 from xauusd.risk.correlation import OpenExposure
 from xauusd.risk.drawdown import DrawdownGuard
+from xauusd.risk.engine_budget import EngineBudget
 from xauusd.risk.gate import RiskGate
 from xauusd.risk.kill_switch import KillSwitch
 
@@ -211,6 +214,17 @@ class BacktestEngine:
         scalp = ScalpPipeline(self.settings, risk_gate=risk_gate)
         micro_analyzer = MicroAnalyzer(self.settings)
 
+        # The intraday engine, on the same broker, gate and kill switch as everything
+        # else. Wired here for the same reason the scalp engine is: an engine that can
+        # trade live but cannot be backtested reaches real money without passing the
+        # deployment gate, which is exactly backwards.
+        engine_budget = EngineBudget(self.settings)
+        intraday = IntradayPipeline(self.settings, risk_gate=risk_gate, budget=engine_budget)
+        # §31, on both engines, in the backtest as well as live. The controller removing
+        # permission live but not in the backtest would make every validation number
+        # describe a system that is not the one trading.
+        regime = MarketRegimeController(self.settings)
+
         m1 = data.get(Timeframe.M1) if cfg.manage_on_m1 else None
 
         decisions: list[Decision] = []
@@ -294,8 +308,14 @@ class BacktestEngine:
                 if self._execute(broker, result.executable, now, open_tags):
                     trades_today += 1
 
+            verdict = regime.evaluate(result.snapshot)
+            gated = self.settings.regime_controller.enabled
+
             # 5) the scalp engine, on the same bar and the same broker
-            if self.settings.scalp.enabled and self.settings.scalp.enabled_models:
+            if gated and not verdict.scalp_allowed:
+                key = f"scalp:regime:{verdict.why_not('scalp')}"
+                rejections[key] = rejections.get(key, 0) + 1
+            elif self.settings.scalp.enabled and self.settings.scalp.enabled_models:
                 micro = micro_analyzer.analyze(view)
                 scalp_cycle = scalp.run(
                     micro,
@@ -326,6 +346,37 @@ class BacktestEngine:
                     decisions.append(sd)
                     if self._execute(broker, sd, now, open_tags):
                         trades_today += 1
+
+            # 6) the intraday engine, on the same bar, the same broker and the same gate
+            if self.settings.intraday.enabled:
+                if gated and not verdict.intraday_allowed:
+                    key = f"intraday:regime:{verdict.why_not('intraday')}"
+                    rejections[key] = rejections.get(key, 0) + 1
+                else:
+                    positions_now = broker.positions()
+                    icycle = intraday.run(
+                        result.snapshot,
+                        account=self._account(broker, now),
+                        spec=self.spec,
+                        now=now,
+                        open_positions=positions_now,
+                        open_risk_pct=self._open_risk_pct(broker, positions_now, equity),
+                        trades_today=trades_today,
+                        strategy_status=self.strategy_status,
+                    )
+                    if icycle.skipped:
+                        key = f"intraday:{icycle.skipped}"
+                        rejections[key] = rejections.get(key, 0) + 1
+                    elif not icycle.approved:
+                        key = f"intraday:{icycle.rejected_by}"
+                        rejections[key] = rejections.get(key, 0) + 1
+                    else:
+                        idec = self._intraday_decision(icycle, now)
+                        decisions.append(idec)
+                        if self._execute(broker, idec, now, open_tags):
+                            trades_today += 1
+                            # §28: one entry per setup, and only once one was taken.
+                            intraday.consume()
 
             if cfg.progress_every and (i % cfg.progress_every == 0):
                 log.info(
@@ -443,6 +494,20 @@ class BacktestEngine:
             config_hash=self.settings.config_hash(),
         )
 
+    def _intraday_decision(self, cycle, now: datetime) -> Decision:  # type: ignore[no-untyped-def]
+        """An approved intraday cycle as the Decision the execution path understands."""
+        return Decision(
+            ts=now,
+            symbol=self.spec.symbol,
+            classification=Classification.INTRADAY,
+            mode=str(self.settings.mode),
+            plan=cycle.plan,
+            score=0.0,
+            gates=tuple(cycle.checks),
+            sizing=cycle.sizing,
+            config_hash=self.settings.config_hash(),
+        )
+
     def _execute(
         self, broker: SimBroker, decision: Decision, now: datetime, open_tags: set[str]
     ) -> bool:
@@ -475,7 +540,12 @@ class BacktestEngine:
             stop_loss=plan.stop_loss,
             take_profit=plan.final_target.price,
             client_tag=tag,
-            magic=self.settings.broker.magic,
+            # The engine's own magic (spec §36), from the SAME mapping the live path
+            # stamps with. A backtest that tagged every position with one magic would
+            # exercise a different `no_stacking` rule and a different per-engine
+            # exposure than the live engine — a parity bug in the one place parity is
+            # supposed to be structural.
+            magic=self.settings.engine_magic(self.settings.engine_for(decision.classification)),
             comment=f"{plan.strategy[:12]}:{tag}",
             max_slippage_points=self.settings.execution.max_slippage_points,
         )

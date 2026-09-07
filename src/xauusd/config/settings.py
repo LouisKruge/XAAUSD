@@ -58,16 +58,29 @@ class RiskConfig(ConfigSection):
     max_daily_drawdown_pct: float = Field(0.02, gt=0, le=0.10)
     max_weekly_drawdown_pct: float = Field(0.05, gt=0, le=0.20)
     max_monthly_drawdown_pct: float = Field(0.10, gt=0, le=0.40)
-    max_total_open_risk_pct: float = Field(0.02, gt=0, le=0.06)
-    max_concurrent_positions: int = Field(1, ge=1, le=5)
+    # OPERATOR-AUTHORISED CHANGE, 2026-09-07. This was 2%, and it is the one risk
+    # number in this file that has ever been raised. It is the ACCOUNT-WIDE AGGREGATE
+    # open-risk ceiling — the total that would be lost if every open position hit its
+    # stop at once — and it was raised to 5% so the two engines can hold positions
+    # simultaneously (spec §15: scalp 1.5% aggregate + intraday 2% = 3.5%, with
+    # headroom). The PER-TRADE cap, `global_risk_cap_pct`, is UNCHANGED at 2%: no
+    # single trade may risk more than it ever could, and a 5% single trade would also
+    # be incoherent against the 2% daily drawdown limit that `_check_ordering` enforces.
+    #
+    # `le` is set to exactly the authorised figure so configuration cannot drift above
+    # it. Raising this again is a decision, not an edit.
+    max_total_open_risk_pct: float = Field(0.05, gt=0, le=0.05)
+    # Two engines, one position each. Per-engine concurrency is bounded separately by
+    # `scalp.max_concurrent` and `intraday.max_concurrent`; this is the account bound.
+    max_concurrent_positions: int = Field(2, ge=1, le=5)
     max_trades_per_day: int = Field(3, ge=1, le=20)
     max_consecutive_losses_lockout: int = Field(4, ge=2, le=20)
     # Spec §15/§16: each engine gets its own aggregate exposure budget and its own daily
     # drawdown limit, so a scalp losing streak disables SCALPING rather than the account.
     # These are budgets WITHIN `max_total_open_risk_pct`, never additions to it — the
     # account cap always binds, and `EngineBudget.may_add` checks both.
-    scalp_aggregate_risk_pct: float = Field(0.02, gt=0, le=0.02)
-    intraday_aggregate_risk_pct: float = Field(0.02, gt=0, le=0.02)
+    scalp_aggregate_risk_pct: float = Field(0.015, gt=0, le=0.05)
+    intraday_aggregate_risk_pct: float = Field(0.02, gt=0, le=0.05)
     scalp_daily_drawdown_pct: float = Field(0.02, gt=0, le=0.10)
     intraday_daily_drawdown_pct: float = Field(0.02, gt=0, le=0.10)
     drawdown_from_peak: bool = Field(
@@ -96,6 +109,24 @@ class RiskConfig(ConfigSection):
             raise ValueError("drawdown limits must satisfy daily <= weekly <= monthly")
         if self.risk_pct_a_plus > self.max_daily_drawdown_pct:
             raise ValueError("a single A+ trade may not risk more than the daily drawdown limit")
+        if self.global_risk_cap_pct > self.max_total_open_risk_pct:
+            raise ValueError(
+                "the per-trade cap may not exceed the account-wide open-risk cap; "
+                "one trade would be allowed to breach the total on its own"
+            )
+        # An engine budget above the account cap is a budget that can never bind, and a
+        # reader would reasonably believe the engine may use it. Neither engine may be
+        # configured to claim more than the account is allowed to carry in total.
+        for name, value in (
+            ("scalp_aggregate_risk_pct", self.scalp_aggregate_risk_pct),
+            ("intraday_aggregate_risk_pct", self.intraday_aggregate_risk_pct),
+        ):
+            if value > self.max_total_open_risk_pct:
+                raise ValueError(
+                    f"{name} ({value:.2%}) exceeds max_total_open_risk_pct "
+                    f"({self.max_total_open_risk_pct:.2%}); an engine may not be budgeted "
+                    "more than the account may carry"
+                )
         return self
 
 
@@ -776,6 +807,60 @@ class Settings(BaseSettings):
             else self.risk.intraday_aggregate_risk_pct
         )
 
+    def engine_max_positions(self, engine: str) -> int:
+        """How many positions one engine may hold at once.
+
+        Separate from `risk.max_concurrent_positions`, which bounds the ACCOUNT. Both
+        apply; the tighter one binds. Without this the account bound would be the only
+        one, and raising it to let the second engine trade would silently also let the
+        first engine hold more.
+        """
+        if engine == "scalp":
+            return self.scalp.max_concurrent
+        if engine == "intraday":
+            return self.intraday.max_concurrent
+        return self.risk.max_concurrent_positions
+
+    def engine_for(self, classification: object) -> str:
+        """Which engine a classification belongs to.
+
+        The bridge between the tier a decision carries and the magic its position is
+        stamped with. One mapping, because the backtester and the live orchestrator both
+        need it and two copies would be free to drift — which is the exact asymmetry
+        BUG-002 was.
+        """
+        from xauusd.domain.enums import Classification
+
+        if classification is Classification.SCALP:
+            return "scalp"
+        if classification is Classification.INTRADAY:
+            return "intraday"
+        return ""
+
+    def engine_magic(self, engine: str) -> int:
+        """The MT5 magic number an engine stamps on its positions (spec §36).
+
+        One mapping, so the thing that OPENS a position and the thing that later
+        attributes it to an engine cannot disagree. They disagreeing is how a position
+        becomes an orphan the reconciler wants to close.
+        """
+        b = self.broker
+        if engine == "scalp":
+            return b.scalp_magic
+        if engine == "intraday":
+            return b.intraday_magic
+        return b.magic
+
+    def owned_magics(self) -> frozenset[int]:
+        """Every magic this system may be holding a position under.
+
+        The reconciler needs all of them: a position carrying the intraday magic is
+        OURS, and treating it as a stranger because reconciliation only knew one number
+        would report a live trade as an unknown position on the account.
+        """
+        b = self.broker
+        return frozenset({b.magic, b.scalp_magic, b.intraday_magic})
+
     def engine_daily_drawdown_limit(self, engine: str) -> float:
         """The daily realised-loss limit that disables one engine (spec §16)."""
         return (
@@ -819,6 +904,12 @@ class Settings(BaseSettings):
 
         if classification is Classification.SCALP:
             return self.scalp.min_gross_rr
+        # §47: INTRADAY_MIN_RR = 1.5. Lower than the A/A+ 1:2 floor on purpose — the
+        # intraday engine targets major liquidity chosen by structure (§26) and takes
+        # whatever RR that structure allows, rather than moving the target out until the
+        # ratio looks good. A/A+ keeps 2.0, unchanged.
+        if classification is Classification.INTRADAY:
+            return self.intraday.min_rr
         return self.thresholds.min_rr
 
     def config_hash(self) -> str:

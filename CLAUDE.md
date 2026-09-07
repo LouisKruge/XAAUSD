@@ -13,9 +13,17 @@ validated A/A+ setups to execution.
 **The system's value is the trustworthiness of its record, not its cleverness.** Before
 adding a feature, ask whether it makes the journal more or less believable.
 
-**Never weaken a risk invariant to make something work.** The 1:2 floor, the 1%/2% caps,
-the drawdown lockouts and the stop-widening prohibition are the product. If a change
-requires relaxing one, the change is wrong.
+**Never weaken a risk invariant to make something work.** The 1:2 floor, the 1%/2%
+per-trade caps, the drawdown lockouts and the stop-widening prohibition are the product.
+If a change requires relaxing one, the change is wrong.
+
+One number has been raised, once, and only because the operator named it: the
+ACCOUNT-WIDE aggregate open-risk cap is 5% (`risk.max_total_open_risk_pct`), so the two
+engines can hold positions at the same time. The PER-TRADE caps are untouched at 1%/2%.
+`docs/FINDINGS.md` §42 records what changed and what deliberately did not. That entry is
+the precedent for how such a change is made — named by the operator, ceiling lowered to
+the authorised figure, new validators added, both halves asserted in tests — not a
+precedent that risk numbers are negotiable.
 
 **`MarketView` is sacred.** Nothing may read data timestamped after the evaluation
 instant. If you need forward data for labelling, it goes in `ml/labeling.py`, which is

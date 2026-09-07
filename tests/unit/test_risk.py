@@ -361,3 +361,129 @@ class TestRiskGate:
         d = g.evaluate(plan(), Classification.A_PLUS, account(), spec(), T0)
         detail = " ".join(c.detail for c in d.checks if c.name == "risk.budget_available")
         assert "global_cap" in detail
+
+
+class TestNoStackingAcrossTwoEngines:
+    """The rule is "no averaging, no hedging". Two engines change who is averaging.
+
+    Both halves stay absolute. What the dual-engine design (spec §15) adds is that a
+    scalp position and an intraday position in the same direction are two independent
+    hypotheses with their own stops, not one position added to twice — and their
+    combined size is bounded by the per-engine budgets and the account-wide open-risk
+    cap, which is where that bound belongs.
+
+    The tests that matter here are the ones proving the relaxation did NOT reach the
+    two things it must never reach: a second position from the same engine, and a
+    position facing the other way.
+    """
+
+    def _gate(self) -> RiskGate:
+        g = RiskGate(Settings())
+        g.drawdown.update(T0, 10_000.0)
+        return g
+
+    @staticmethod
+    def _pos(magic: int, direction: Direction = Direction.LONG, ticket: int = 1):  # type: ignore[no-untyped-def]
+        sl = 1990.0 if direction is Direction.LONG else 2010.0
+        tp = 2020.0 if direction is Direction.LONG else 1980.0
+        return BrokerPosition(ticket, "XAUUSD", direction, 0.1, 2000.0, sl, tp, T0, magic=magic)
+
+    def test_an_engine_may_not_add_to_its_own_position(self) -> None:
+        """Averaging in, which is the thing the rule was written for."""
+        s = Settings()
+        g = self._gate()
+        d = g.evaluate(
+            plan(),
+            Classification.SCALP,
+            account(),
+            spec(),
+            T0,
+            open_positions=[self._pos(s.broker.scalp_magic)],
+            engine="scalp",
+        )
+        assert not d.approved
+        assert "risk.no_stacking" in d.failed
+
+    def test_no_engine_may_hedge_another(self) -> None:
+        """Opposite directions on one symbol is a hedge however it is labelled."""
+        s = Settings()
+        g = self._gate()
+        d = g.evaluate(
+            plan(Direction.LONG),
+            Classification.INTRADAY,
+            account(),
+            spec(),
+            T0,
+            open_positions=[self._pos(s.broker.scalp_magic, Direction.SHORT)],
+            engine="intraday",
+        )
+        assert not d.approved
+        assert "risk.no_stacking" in d.failed
+
+    def test_the_other_engine_in_the_same_direction_is_permitted(self) -> None:
+        """The dual-engine case. Permitted HERE; still bounded by the budgets."""
+        s = Settings()
+        g = self._gate()
+        d = g.evaluate(
+            plan(Direction.LONG),
+            Classification.INTRADAY,
+            account(),
+            spec(),
+            T0,
+            open_positions=[self._pos(s.broker.scalp_magic, Direction.LONG)],
+            engine="intraday",
+        )
+        assert "risk.no_stacking" not in d.failed
+
+    def test_an_unnamed_caller_keeps_the_original_absolute_rule(self) -> None:
+        """The relaxation is opt-in. A caller that does not name an engine is refused
+        by ANY open position on the symbol, exactly as before this existed — so no
+        existing path silently inherited a weaker rule."""
+        s = Settings()
+        g = self._gate()
+        d = g.evaluate(
+            plan(Direction.LONG),
+            Classification.A,
+            account(),
+            spec(),
+            T0,
+            open_positions=[self._pos(s.broker.scalp_magic, Direction.LONG)],
+        )
+        assert not d.approved
+        assert "risk.no_stacking" in d.failed
+
+    def test_a_foreign_position_still_blocks_a_named_engine(self) -> None:
+        """A manual trade or another EA's position belongs to no engine of ours. It is
+        not "the other engine's", so it must not be waved through."""
+        g = self._gate()
+        d = g.evaluate(
+            plan(Direction.LONG),
+            Classification.SCALP,
+            account(),
+            spec(),
+            T0,
+            open_positions=[self._pos(999_999, Direction.SHORT)],
+            engine="scalp",
+        )
+        assert not d.approved
+        assert "risk.no_stacking" in d.failed
+
+    def test_a_foreign_same_direction_position_also_blocks(self) -> None:
+        """The rule is stated as what is ALLOWED, so an unforeseen owner blocks.
+
+        A manual trade in the same direction is not the other engine's position. We
+        cannot see its stop, its size or its intent, and treating it as a sibling would
+        make the account's exposure a number nobody can compute.
+        """
+        g = self._gate()
+        d = g.evaluate(
+            plan(Direction.LONG),
+            Classification.SCALP,
+            account(),
+            spec(),
+            T0,
+            open_positions=[self._pos(999_999, Direction.LONG)],
+            engine="scalp",
+        )
+        assert not d.approved
+        assert "risk.no_stacking" in d.failed

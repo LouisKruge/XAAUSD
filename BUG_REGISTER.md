@@ -331,3 +331,28 @@ p99 exceeds its own interval stops being continuous without ever reporting an er
 - §39 profitability — **NOT POSSIBLE HERE**, needs the operator's harvested history
 - Everything in the environment-limits table above, which needs a Windows machine with
   MT5 attached
+
+---
+
+## Wiring audit, 2026-09-07 — the intraday engine
+
+Not bugs in shipped behaviour: defects found while wiring `ExpansionPullbackEngine`,
+which had been committed the day before as tested-but-connected-to-nothing. Each would
+have been a live fault the moment the engine was switched on. Full write-up in
+`docs/FINDINGS.md` §44.
+
+| # | Defect | Severity | Status | Test |
+|---|---|---|---|---|
+| W-1 | Positions were stamped with `broker.magic` regardless of engine, so `scalp_magic`/`intraday_magic` were fields nothing set and engine attribution was arithmetic on a constant | HIGH | **FIXED** — `Settings.engine_magic` is the single mapping, used by the executor and by every consumer | `test_intraday_wiring.py::TestEngineAttributionIsOneMapping` |
+| W-2 | `Reconciler` knew one magic; a live intraday position would have been reported `UNTAGGED_POSITION` / CRITICAL — "a human is trading this account" — about our own trade | CRITICAL | **FIXED** — takes `owned_magics()`; a genuinely foreign magic is still CRITICAL | `test_failure_modes.py::TestTheReconcilerKnowsEveryEngineIsOurs` |
+| W-3 | `broker.positions(magic=broker.magic)` hid the other engine's positions from exposure, from the concurrency check, and from **FLATTEN** — which would have reported the account flat with a position open | CRITICAL | **FIXED** — `_our_positions()` spans every owned magic | covered by W-2's mapping test + `test_intraday_wiring.py` |
+| W-4 | The regime controller (§31) was wired into the live orchestrator but not the backtester — the FINDINGS 38 asymmetry, in the direction where validation describes a system that is not the one trading | HIGH | **FIXED** — both runners, both engines | `test_intraday_wiring.py::TestBothRunnersDriveIt::test_both_runners_consult_the_regime_controller` |
+| W-5 | `no_stacking` refused any second position on the symbol, so with two engines on XAUUSD the second could never open — the wiring would have been decorative | HIGH | **FIXED** — engine-aware, opt-in, and neither averaging nor hedging was relaxed | `test_risk.py::TestNoStackingAcrossTwoEngines` (6) |
+| W-6 | `ScalpPipeline` counted every account position against `scalp.max_concurrent`, so one intraday trade read as "the scalp engine is full" | MEDIUM | **FIXED** — counts its own magic; RiskGate still applies the account bound | `test_scalp_wiring.py::test_another_engines_position_is_not_this_engines_concurrency` |
+
+### Authorised change, recorded separately
+
+`risk.max_total_open_risk_pct` was raised from 2% to 5% on explicit operator
+instruction. It is the **account-wide aggregate**, not the per-trade cap, which stays at
+2%. See `docs/FINDINGS.md` §42 for what changed, what deliberately did not, and the two
+validators added rather than removed.
