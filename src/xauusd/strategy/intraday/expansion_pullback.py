@@ -41,6 +41,11 @@ log = get_logger(__name__)
 CONTEXT_TF = (Timeframe.H4, Timeframe.H1)
 SETUP_TF = Timeframe.M15
 TRIGGER_TF = Timeframe.M5
+# Where §26's "major liquidity" is read from. D1/W1 extremes and session highs/lows are
+# what the spec names; H4 and M15 pools are admitted only because `_liquidity_target`
+# already refuses anything inside the R:R floor, which is what excludes the micro-pools
+# that used to be picked as targets.
+TARGET_TFS = frozenset({Timeframe.W1, Timeframe.D1, Timeframe.H4, Timeframe.M15})
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +80,11 @@ class IntradayEvaluation:
     entry: float | None = None
     stop_loss: float | None = None
     target: float | None = None
+    # Which of the two rules produced the target. A journal that says "major liquidity"
+    # about a number that came from a fixed R:R fallback is a journal telling a story
+    # about structure that was never there — and fifteen of nineteen targets on
+    # synthetic data came from the fallback, so this is the common case, not the edge.
+    target_source: str = ""
 
     @property
     def is_entry(self) -> bool:
@@ -88,6 +98,7 @@ class IntradayEvaluation:
             "entry": self.entry,
             "stop_loss": self.stop_loss,
             "target": self.target,
+            "target_source": self.target_source,
         }
 
 
@@ -153,7 +164,7 @@ class ExpansionPullbackEngine:
         if not confirmed:
             return IntradayEvaluation("pullback", direction=direction, reasons=(confirm_why,))
 
-        entry, stop, target = self._levels(snap, direction, zone)
+        entry, stop, target, target_source = self._levels(snap, direction, zone)
         if stop is None or target is None:
             return IntradayEvaluation(
                 "pullback",
@@ -161,7 +172,12 @@ class ExpansionPullbackEngine:
                 reasons=("no structural stop or target available",),
             )
         return IntradayEvaluation(
-            "entry", direction=direction, entry=entry, stop_loss=stop, target=target
+            "entry",
+            direction=direction,
+            entry=entry,
+            stop_loss=stop,
+            target=target,
+            target_source=target_source,
         )
 
     def consume(self) -> None:
@@ -247,7 +263,7 @@ class ExpansionPullbackEngine:
 
     def _levels(
         self, snap: MarketSnapshot, direction: Direction, zone: tuple[float, float]
-    ) -> tuple[float, float | None, float | None]:
+    ) -> tuple[float, float | None, float | None, str]:
         """§25 stop behind the setup-timeframe structure, §26 target at major liquidity.
 
         The stop is deliberately NOT a tight M1 swing: §25 says it must give the position
@@ -260,31 +276,59 @@ class ExpansionPullbackEngine:
         stop = (bottom - buffer) if direction is Direction.LONG else (top + buffer)
         risk = abs(entry - stop)
         if risk <= 0:
-            return entry, None, None
+            return entry, None, None, ""
 
         # §26: aim at major liquidity, never at a level chosen because it produces a
         # flattering R:R. Structure first — the RR is whatever the structure allows, and
         # the minimum-RR gate decides whether that is enough.
-        target = self._liquidity_target(snap, direction, entry)
+        target = self._liquidity_target(snap, direction, entry, risk)
+        source = "resting liquidity ahead (§26)"
         if target is None:
-            target = (
-                entry + risk * self.settings.intraday.fallback_target_rr
-                if direction is Direction.LONG
-                else entry - risk * self.settings.intraday.fallback_target_rr
-            )
-        return entry, stop, target
+            rr = self.settings.intraday.fallback_target_rr
+            source = f"no structural level clears the floor; fallback {rr:.2f}R"
+            target = entry + risk * rr if direction is Direction.LONG else entry - risk * rr
+        return entry, stop, target, source
 
-    @staticmethod
-    def _liquidity_target(snap: MarketSnapshot, direction: Direction, entry: float) -> float | None:
-        """The nearest major resting liquidity ahead — previous day/week extremes and
-        session highs/lows are what §26 names."""
+    def _liquidity_target(
+        self, snap: MarketSnapshot, direction: Direction, entry: float, risk: float
+    ) -> float | None:
+        """The nearest resting liquidity ahead that is far enough to be a target at all.
+
+        The original rule was "nearest resting pool ahead, full stop", and it was wrong
+        in a way that only showed up as frequency. Measured over five weeks of M5
+        instants, it aimed at an M15 micro-pool eleven times out of nineteen completed
+        setups; the median R:R at a completed setup was 1.12 and ten of the nineteen were
+        then refused by the 1.5 floor. The engine was doing all the work of finding a
+        setup and then aiming it at a level twenty minutes away.
+
+        Two things were wrong, and §26 names both of them itself.
+
+        **"Major" has to mean major.** §26 says previous day/week extremes and session
+        highs/lows. An M15 equal-high is not that. It is included here only because it
+        can still be a real draw when it is far enough to matter, which the second rule
+        already establishes.
+
+        **A level inside the R:R floor is not a target.** The engine may not trade to it
+        — `min_rr` refuses — so treating it as *the* target means the nearest untradeable
+        level vetoes a trade that had a perfectly good level further out. Skipping it is
+        not choosing a level for a flattering ratio: nothing is invented, no price is
+        moved, and the ratio is still whatever the structure gives. It is declining to
+        aim at something the engine is not allowed to aim at.
+
+        Returns None when no level ahead qualifies, which means "no structural target",
+        never a guessed one — the caller falls back to a stated RR and the journal shows
+        which of the two produced the number.
+        """
+        cfg = self.settings.intraday
         long = direction is Direction.LONG
+        floor = risk * cfg.min_rr if cfg.target_must_clear_rr_floor else 0.0
         candidates = [
             p.price
             for p in snap.liquidity
             if p.is_resting
-            and p.timeframe in (Timeframe.D1, Timeframe.W1, Timeframe.H4, Timeframe.M15)
+            and p.timeframe in TARGET_TFS
             and ((p.price > entry) if long else (p.price < entry))
+            and abs(p.price - entry) >= floor
         ]
         if not candidates:
             return None

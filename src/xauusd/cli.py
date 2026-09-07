@@ -119,6 +119,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"engines          : scalp {'on' if settings.scalp.enabled else 'off'}, "
         f"intraday {'on' if settings.intraday.enabled else 'off'}"
     )
+    # Per-trade risk and trade frequency are the same dial, and the link is invisible
+    # until an operator wonders why the bot went quiet on Tuesday. State it.
+    for label, risk in (
+        ("A+", settings.risk.risk_pct_a_plus),
+        ("intraday", settings.intraday.risk_pct),
+        ("scalp", settings.scalp.risk_pct),
+    ):
+        day, week = settings.losses_before_lockout(risk)
+        print(
+            f"  {label:<9}{risk:>7.2%}/trade -> at least {day} losing trade(s) "
+            f"locks the day, {week} locks the week"
+        )
     print(f"min RR           : {settings.thresholds.min_rr}")
 
     # Say plainly whether .env was found and used. Its absence was the failure that

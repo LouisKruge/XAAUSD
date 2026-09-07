@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -399,7 +400,15 @@ class IntradayConfig(ConfigSection):
     """
 
     enabled: bool = False
-    risk_pct: float = Field(0.02, gt=0, le=0.02, description="§18: 2% per trade.")
+    # §18 names 2%, and 2% is still reachable (`le` permits it) — but it is not the
+    # DEFAULT, because 2% against the 2% daily drawdown limit means one losing trade
+    # ends the trading day and three end the week, and a weekly lockout needs a manual
+    # clear. A default that guarantees a one-trade day is a bad default however
+    # authoritative the number sounds. At 1% the same limits absorb 2 losses a day and
+    # 5 a week. `Settings.losses_before_lockout` is the arithmetic, and `doctor` prints
+    # it for whatever value is configured, so raising this back to 2% is a visible
+    # choice rather than a silent one. See FINDINGS 45.
+    risk_pct: float = Field(0.01, gt=0, le=0.02, description="§18 allows up to 2%.")
     max_concurrent: int = Field(1, ge=1, le=1, description="§28: one at a time, always.")
     min_rr: float = Field(1.5, ge=1.0, description="§47: INTRADAY_MIN_RR = 1.5.")
     fallback_target_rr: float = Field(2.0, ge=1.0, le=5.0)
@@ -407,6 +416,12 @@ class IntradayConfig(ConfigSection):
     # reason price is where it is.
     setup_max_age_minutes: int = Field(240, ge=15, le=1440)
     stop_buffer_atr: float = Field(0.25, ge=0, le=2.0)
+    # A liquidity level nearer than `min_rr` is one the engine may not trade to, so
+    # treating it as THE target lets the nearest untradeable level veto a setup that had
+    # a usable level further out. Set False to restore "nearest level, whatever it is"
+    # and watch the median R:R at a completed setup collapse; FINDINGS 45 has the
+    # measurement that produced this default.
+    target_must_clear_rr_floor: bool = True
     partial_tp_enabled: bool = Field(True, description="§27: 50% at TP1, 50% runner.")
     partial_tp_fraction: float = Field(0.5, gt=0, lt=1)
 
@@ -820,6 +835,32 @@ class Settings(BaseSettings):
         if engine == "intraday":
             return self.intraday.max_concurrent
         return self.risk.max_concurrent_positions
+
+    def losses_before_lockout(self, risk_pct: float) -> tuple[int, int]:
+        """CONSECUTIVE full-R losses at `risk_pct` before the day, then the week, locks.
+
+        Consecutive because `PeriodState.drawdown_pct` measures from the high-water mark
+        rather than from the period's opening equity: a winner that makes a new high
+        moves the reference and the count starts again. So this is the length of a
+        losing RUN the period can absorb, not a quota of losses per calendar week.
+
+        The interaction nobody sees until it bites. `DrawdownGuard` locks a period when
+        drawdown from the high-water mark reaches its limit, so at 2% per trade against
+        a 2% daily limit **one losing trade ends the trading day**, and three end the
+        week. Per-trade risk and trade frequency are therefore the same dial, and a
+        frequency target that ignores this produces an engine that trades twice and then
+        goes quiet for reasons the operator cannot see.
+
+        This is a LOWER bound. `RiskGate.approved_risk_pct` already scales size down by
+        the remaining drawdown budget, so the last trades before a lockout are smaller
+        than a full R and the real count is a little higher. It is stated as the floor
+        because the floor is the number worth planning against.
+        """
+        if risk_pct <= 0:
+            return (0, 0)
+        day = math.ceil(self.risk.max_daily_drawdown_pct / risk_pct)
+        week = math.ceil(self.risk.max_weekly_drawdown_pct / risk_pct)
+        return (day, week)
 
     def engine_for(self, classification: object) -> str:
         """Which engine a classification belongs to.

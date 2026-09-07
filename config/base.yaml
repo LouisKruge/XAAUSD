@@ -67,7 +67,19 @@ intraday:
   # out-of-sample validation (`intraday_strategy_validated`). Turning this on does not
   # arm anything.
   enabled: true
-  risk_pct: 0.02          # §18
+  # §18 says 2%. 2% cannot coexist with a target of 2-5 trades a week, and the reason is
+  # arithmetic rather than opinion: `DrawdownGuard` locks a period when drawdown from
+  # the high-water mark reaches its limit, so at 2% per trade against the 2% daily limit
+  # ONE losing trade ends the trading day and three end the week — and a weekly lockout
+  # needs a manual clear. The engine would trade twice and go quiet.
+  #
+  # At 1.00% the same limits absorb 2 losing trades a day and 5 a week, which carries an
+  # all-losing week at the top of the requested range. `doctor` prints this arithmetic
+  # for whatever value is set here, so changing it does not hide the consequence.
+  #
+  # The other resolution is to raise the daily/weekly drawdown limits. That is a real
+  # risk invariant and is NOT changed here.
+  risk_pct: 0.01
   max_concurrent: 1       # §28 — one entry per setup, one position at a time
   min_rr: 1.5             # §47 INTRADAY_MIN_RR
   fallback_target_rr: 2.0

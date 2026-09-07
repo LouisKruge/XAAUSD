@@ -234,7 +234,8 @@ class IntradayPipeline:
                 TargetLevel(
                     price=ev.target,
                     rr=rr,
-                    rationale="major liquidity ahead (§26)",
+                    # What ACTUALLY produced this price, not what §26 hopes produced it.
+                    rationale=ev.target_source or "unrecorded",
                 ),
             ),
             ts=now,
@@ -248,6 +249,7 @@ class IntradayPipeline:
                 "engine": INTRADAY,
                 "reached": ev.reached,
                 "reasons": list(ev.reasons),
+                "target_source": ev.target_source,
                 "expansion_at": setup.expansion_at.isoformat() if setup else None,
                 "expansion_price": setup.expansion_price if setup else None,
                 "h4_bias": str(snap.bias(Timeframe.H4)),

@@ -297,14 +297,57 @@ class TestTheWholeChainCanActuallyProduceATrade:
         assert cycle.risk_pct == pytest.approx(Settings().intraday.risk_pct)
         assert cycle.plan is not None and cycle.plan.rr >= Settings().intraday.min_rr
 
-    def test_the_rr_floor_still_refuses_a_target_too_close(self, in_the_zone) -> None:
-        """§26 takes whatever RR the structure allows; the floor decides if that is
-        enough. Nearby liquidity gives a real setup a sub-1.5R target, and it must be
-        refused rather than have the target moved out until the ratio looks good."""
+    def test_a_level_too_close_to_trade_to_no_longer_vetoes_the_setup(self, in_the_zone) -> None:
+        """The defect this engine shipped with (FINDINGS 45).
+
+        `in_the_zone` carries real nearby liquidity. Under the original rule the nearest
+        pool — an M15 micro-level minutes away — became THE target, the plan came out
+        below the 1.5 floor, and the setup was refused. The nearest level the engine is
+        actually permitted to trade to is the target now, so a level it may not aim at
+        can no longer veto a setup that had a usable one further out.
+        """
         cycle = _run(IntradayPipeline(settings()), _aligned(in_the_zone))
         assert cycle.reached == "entry", "the sequence must complete for this to be a test"
-        assert not cycle.approved
-        assert cycle.rejected_by == "risk.min_rr"
+        assert cycle.approved, f"refused by {cycle.rejected_by}"
+        assert cycle.plan is not None
+        assert cycle.plan.rr >= Settings().intraday.min_rr
+
+    def test_the_target_is_a_real_level_and_not_an_invented_price(self, in_the_zone) -> None:
+        """Skipping a level is allowed; inventing one is not. Whatever the engine aims
+        at must be either a resting liquidity price that exists in the snapshot, or the
+        stated fallback R:R — and the journal must be able to say which."""
+        snap = _aligned(in_the_zone)
+        cycle = _run(IntradayPipeline(settings()), snap)
+        assert cycle.plan is not None
+        target = cycle.plan.targets[0].price
+        entry, stop = cycle.plan.entry, cycle.plan.stop_loss
+        fallback = entry + abs(entry - stop) * Settings().intraday.fallback_target_rr
+        real_levels = {p.price for p in snap.liquidity if p.is_resting}
+        assert target in real_levels or target == pytest.approx(fallback)
+
+    def test_the_floor_is_still_enforced_at_the_gate(self, in_the_zone) -> None:
+        """Defence in depth. The target rule cannot produce a sub-floor plan, but
+        slippage at execution can, so the gate keeps its own check rather than trusting
+        the strategy to have got it right."""
+        from xauusd.risk.gate import RiskGate
+
+        gate = RiskGate(settings())
+        gate.drawdown.update(NOW, 100_000.0)
+        cycle = _run(IntradayPipeline(settings()), _aligned(in_the_zone))
+        assert cycle.plan is not None
+        # The same plan with its target dragged inside the floor, as slippage would.
+        from xauusd.domain.types import TargetLevel
+
+        plan = cycle.plan
+        risk = abs(plan.entry - plan.stop_loss)
+        near = plan.entry + risk * 0.5
+        tight = replace(plan, targets=(TargetLevel(near, 0.5, "dragged in"),))
+        assert tight.rr < Settings().intraday.min_rr
+        decision = gate.evaluate(
+            tight, Classification.INTRADAY, account(), SPEC, NOW, engine="intraday"
+        )
+        assert not decision.approved
+        assert "risk.min_rr" in decision.failed
 
     def test_a_scalp_position_in_the_same_direction_does_not_block_it(self, in_the_zone) -> None:
         """The dual-engine case, end to end (§15). Two engines, one symbol, one
@@ -396,3 +439,34 @@ class TestEngineAttributionIsOneMapping:
         s = Settings()
         for engine in ("", "scalp", "intraday"):
             assert s.engine_magic(engine) in s.owned_magics()
+
+
+class TestTheJournalSaysWhereTheTargetCameFrom:
+    """Fifteen of nineteen targets on synthetic data came from the fallback R:R, not
+    from structure (FINDINGS 45). A plan that labels all of them "major liquidity" is
+    telling a story about structure that was never there — and it is the common case,
+    not the edge case, so the label has to be earned."""
+
+    def test_a_structural_target_says_so(self, in_the_zone) -> None:
+        cycle = _run(IntradayPipeline(settings()), _aligned(in_the_zone))
+        assert cycle.plan is not None
+        snap = _aligned(in_the_zone)
+        target = cycle.plan.targets[0].price
+        if target in {p.price for p in snap.liquidity if p.is_resting}:
+            assert "liquidity" in cycle.plan.targets[0].rationale
+
+    def test_a_fallback_target_admits_it(self, in_the_zone) -> None:
+        snap = replace(_aligned(in_the_zone), liquidity=())
+        cycle = _run(IntradayPipeline(settings()), snap)
+        assert cycle.plan is not None
+        rationale = cycle.plan.targets[0].rationale
+        assert "fallback" in rationale
+        assert "liquidity" not in rationale
+
+    def test_the_source_travels_into_the_evidence(self, in_the_zone) -> None:
+        """The journal is read long after the cycle is gone; the reason has to be in
+        the record rather than in a log line that scrolled away."""
+        snap = replace(_aligned(in_the_zone), liquidity=())
+        cycle = _run(IntradayPipeline(settings()), snap)
+        assert cycle.plan is not None
+        assert "fallback" in str(cycle.plan.evidence["target_source"])

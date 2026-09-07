@@ -356,3 +356,24 @@ have been a live fault the moment the engine was switched on. Full write-up in
 instruction. It is the **account-wide aggregate**, not the per-trade cap, which stays at
 2%. See `docs/FINDINGS.md` §42 for what changed, what deliberately did not, and the two
 validators added rather than removed.
+
+---
+
+## Frequency audit, 2026-09-07 — two trades in four weeks
+
+The intraday engine traded 0.54 times a week. The obvious reading — "the setup
+conditions are too strict" — was wrong on both counts, and measuring before tuning is
+the only reason no knob got turned. Full write-ups in `docs/FINDINGS.md` §45 and §46.
+
+| # | Defect | Severity | Status | Test |
+|---|---|---|---|---|
+| F-1 | `_liquidity_target` aimed at the **nearest** resting pool of any size. On 11 of 19 completed setups that was an M15 micro-level minutes away; median R:R at a completed setup was 1.12 against a 1.5 floor, so **4 setups in 5 were thrown away by the floor**. §26 says major liquidity — previous day/week extremes and session highs/lows — and an M15 equal-high is not that | HIGH | **FIXED** — nearest level that clears the floor; nothing invented, nothing skipped that was viable | `test_intraday_engine.py::TestTheTargetIsTheNearestOneWorthTrading` (8) |
+| F-2 | Every target was labelled "major liquidity ahead (§26)" including the 15-in-19 that came from the fixed R:R fallback — the journal asserting structure that was never there | MEDIUM | **FIXED** — `target_source` is recorded and travels into the plan's evidence | `test_intraday_wiring.py::TestTheJournalSaysWhereTheTargetCameFrom` (3) |
+| F-3 | Per-trade risk silently caps trade frequency and nothing said so. `drawdown_pct >= limit_pct` from the high-water mark means 2% per trade against a 2% daily limit ends the day on **one** loss and the week on three — and a weekly lockout needs a manual clear, so a backtest simply stops. 4,681 evaluations in one run were refused by a lockout rather than by a gate | HIGH | **FIXED** — `Settings.losses_before_lockout` is the arithmetic and `doctor` prints it per tier; default intraday risk is 1% | `test_intraday_engine.py::TestRiskAndFrequencyAreTheSameDial` (4) |
+
+Measured effect, same data, scalp off, 5.4 weeks of synthetic M5 history:
+**0.54 intraday trades/week → 3.79**. That is a frequency, not an edge; expectancy over
+those fourteen trades was **-0.195R** on random-walk data, and §46 says so at length.
+
+No risk invariant was relaxed to get there. The daily and weekly drawdown limits are
+unchanged; per-trade risk went **down**.

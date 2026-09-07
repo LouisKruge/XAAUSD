@@ -1457,3 +1457,137 @@ which is what a random walk should do and is not evidence of anything. It ships
 `enabled: false` and DEV, every scalp parameter changed underneath it in the same work,
 and no out-of-sample validation on real history has been run against any of it. Nothing
 here is a claim about profitability.
+
+## 45. The intraday engine aimed at whatever level was nearest, and it cost four trades in five
+
+The engine took two trades in four weeks. The obvious reading — "the setup conditions
+are too strict" — was wrong, and measuring instead of tuning is the only reason that was
+caught before a knob got turned.
+
+Counted over 8,184 M5 instants (5.4 weeks of synthetic history):
+
+| stage | count | per week |
+|---|---|---|
+| regime controller removed permission | 1,883 | — |
+| sequence completed, a setup reached `entry` | 36 | **6.6** |
+| ...of which cleared the 1.5 R:R floor | 10 | 1.8 |
+| ...refused by `risk.min_rr` | 26 | 4.8 |
+
+Supply was never the problem. Nearly seven setups a week completed the whole ordered
+sequence, and **four in five were then thrown away by the R:R floor**.
+
+### Why the R:R was so bad
+
+`_liquidity_target` returned the *nearest* resting pool ahead, on any of D1/W1/H4/M15.
+On eleven of nineteen completed setups the nearest pool was an **M15 micro-level**, often
+minutes away. Median R:R at a completed setup was **1.12**, against a 1.5 floor.
+
+An M15 equal-high is not what §26 means by "major liquidity" — §26 says previous day and
+week extremes and session highs and lows. The engine was doing the entire job of
+establishing an H4/H1 regime, waiting for an expansion, waiting for a pullback into a
+structural zone and waiting for M5 confirmation, and then aiming the result at the first
+squiggle above it.
+
+The second error compounds the first: a level the engine may not trade to is not a
+target, because `min_rr` will refuse it. So the nearest **untradeable** level was
+vetoing setups that had a perfectly usable level further out.
+
+### The rule now
+
+The nearest resting level ahead **that clears the R:R floor**; failing that, the stated
+fallback R:R. Measured on the same nineteen setups:
+
+| target rule | median R:R | clears 1.5R |
+|---|---|---|
+| nearest level, any (original) | 1.12 | 9/19 |
+| nearest D1/W1/H4 only | 2.00 | 17/19 |
+| **nearest level clearing the floor** | 2.00 | **19/19** |
+
+This is close to a line §26 draws — "never at a level chosen because it produces a
+flattering R:R" — and it is worth being explicit about why it stays on the right side.
+Nothing is invented and no price is moved: every candidate is a real resting level that
+exists in the snapshot, and the R:R is still whatever the structure gives. What changed
+is that the engine no longer aims at something it is forbidden to aim at. The test
+`test_the_target_is_a_real_level_and_not_an_invented_price` pins the part that matters —
+the target is either a price that exists in the snapshot's liquidity or the stated
+fallback, and never anything else.
+
+`intraday.target_must_clear_rr_floor` turns it off, and the floor check stays in
+`RiskGate` regardless: the strategy can no longer produce a sub-floor plan, but slippage
+at execution still can, so the gate keeps its own check rather than trusting the strategy
+to have got it right.
+
+### What this measurement does NOT say
+
+Fifteen of the nineteen targets came from the **fallback**, not from structure, because
+synthetic random-walk data has almost no session structure to aim at. On real gold, with
+genuine previous-day extremes and session highs and lows, the structural path should fire
+far more often — and that is a prediction, not a result. The frequency numbers here
+describe the mechanics of the sequence, not an edge, and nothing in this entry is
+evidence that any of these trades make money.
+
+## 46. Per-trade risk and trade frequency are the same dial, and nothing said so
+
+A request for 2-5 intraday trades a week is not a request about setup logic. Measured
+through the backtester on 5.4 weeks of synthetic M5 history, with the target rule of
+FINDINGS 45 already in place and the scalp engine off:
+
+| intraday risk/trade | trades | per week | blocked by |
+|---|---|---|---|
+| 2.00% (spec §18) | 2 | **0.54** | weekly drawdown ×4,681, daily ×334 |
+| 1.00% | 14 | **3.79** | daily drawdown ×86 |
+| 0.50% | 14 | **3.79** | nothing |
+
+At 2% the engine took two trades and was then locked out for **the rest of the run** —
+4,681 evaluations refused by a lockout, not by a gate, not by an absent setup. The setup
+supply was identical in all three rows. The only thing that changed was whether the
+account was allowed to act on it.
+
+The 0.50% row is the one that settles the number. Halving risk again buys **nothing** —
+the same fourteen trades, the same R-expectancy — because at 1% the drawdown lockout has
+already stopped costing trades and 3.79/week is simply the supply. So 1% is not a
+midpoint someone liked: it is the largest per-trade risk at which the engine still takes
+every setup the market offers it. Above it, trades are lost to lockouts; below it,
+nothing is gained but size.
+
+### The arithmetic, which was never written down anywhere
+
+`PeriodState.breached` is `drawdown_pct >= limit_pct`, measured from the **high-water
+mark**. So with a 2% daily limit and 2% per trade, the first losing trade takes drawdown
+to exactly 2% and **the trading day is over**. Three losses reach the 5% weekly limit —
+and `weekly_lockout_needs_manual_clear` is true, so that one survives the week roll and
+waits for a human. In a backtest there is no human, which is why the run simply stopped.
+
+`Settings.losses_before_lockout(risk_pct)` is now that arithmetic, and `doctor` prints
+it for every tier at whatever risk is configured:
+
+```
+  A+         2.00%/trade -> at least 1 losing trade(s) locks the day, 3 locks the week
+  intraday   1.00%/trade -> at least 2 losing trade(s) locks the day, 5 locks the week
+  scalp      0.50%/trade -> at least 4 losing trade(s) locks the day, 10 locks the week
+```
+
+It is a lower bound on two counts: `RiskGate.approved_risk_pct` already sizes down by the
+remaining drawdown budget, so the last trades before a lockout are smaller than a full R;
+and the measurement is from the peak, so it is the length of a losing *run* the period
+can absorb, not a quota per calendar week.
+
+### The resolution, and the one that was not taken
+
+The default intraday risk is now **1%**, not §18's 2%. §18's 2% is still reachable —
+`le` permits it and an operator can set it — but it is not the default, because a default
+that guarantees a one-trade day is a bad default however authoritative the number sounds.
+Lowering per-trade risk *reduces* exposure, so it is the safe direction.
+
+The other resolution was to raise the daily and weekly drawdown limits. Those are risk
+invariants and **they were not touched**. If 2% per intraday trade is wanted, the honest
+version of that request is "raise the daily drawdown limit", and that is a decision for
+the operator to make explicitly, not a side effect of a frequency target.
+
+### What this does NOT say
+
+3.79 trades a week is a **frequency**, measured on synthetic random-walk data. Expectancy
+across those fourteen trades was **-0.195R** — negative, on a sample far too small to
+mean anything in either direction, on data with no edge in it by construction. Trading
+more often is not trading better, and this entry is evidence of exactly one thing: that
+the engine is no longer prevented from trading by an interaction nobody had written down.

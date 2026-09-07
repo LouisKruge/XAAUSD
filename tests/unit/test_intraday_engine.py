@@ -217,10 +217,21 @@ class TestItIsConfiguredAsALowFrequencyEngine:
         with pytest.raises(ValidationError):
             type(cfg)(max_concurrent=2)
 
-    def test_risk_is_the_full_two_percent(self) -> None:
-        """§18. Materially different from the scalp's 0.50%, which is the point."""
-        assert Settings().intraday.risk_pct == pytest.approx(0.02)
-        assert Settings().scalp.risk_pct < Settings().intraday.risk_pct
+    def test_risk_is_materially_larger_than_a_scalp_but_not_the_full_two_percent(
+        self,
+    ) -> None:
+        """§18 allows 2%; the default is 1%, and the difference is not a compromise.
+
+        A 2% default against the 2% daily drawdown limit means the first losing trade
+        ends the trading day (FINDINGS 45), so it would guarantee the low frequency this
+        engine was built to avoid. What §18 is really asserting — that an intraday trade
+        risks materially more than a scalp — is what this pins, along with the ceiling
+        that keeps 2% reachable for an operator who wants it.
+        """
+        s = Settings()
+        assert s.scalp.risk_pct < s.intraday.risk_pct
+        assert s.intraday.risk_pct == pytest.approx(0.01)
+        assert type(s.intraday).model_fields["risk_pct"].metadata[-1].le == 0.02
 
     def test_it_ships_disabled(self) -> None:
         """Every new strategy in this project ships off until it has been validated."""
@@ -256,3 +267,124 @@ class TestSetupState:
         assert eng.setup.consumed
         assert eng.setup.expansion_price == 1999.5
         assert eng.setup.direction is Direction.SHORT
+
+
+class TestTheTargetIsTheNearestOneWorthTrading:
+    """FINDINGS 45: the engine aimed at whatever level was nearest, and four completed
+    setups in five were then thrown away by the R:R floor.
+
+    The rule is now "the nearest resting level ahead that clears the floor". The tests
+    that matter are the ones separating that from the thing §26 forbids — choosing a
+    level because it produces a flattering ratio. Nothing may be invented, and a level
+    that clears the floor may never be skipped in favour of a further one.
+    """
+
+    @staticmethod
+    def _pool(price: float, tf=Timeframe.H4, swept=False):  # type: ignore[no-untyped-def]
+        from xauusd.domain.enums import LiquidityKind
+        from xauusd.domain.types import LiquidityPool
+
+        return LiquidityPool(
+            kind=LiquidityKind.EQH,
+            timeframe=tf,
+            price=price,
+            formed_ts=NOW - timedelta(hours=2),
+            swept_ts=NOW if swept else None,
+        )
+
+    def _target(self, base, pools, entry=2000.0, risk=1.0):  # type: ignore[no-untyped-def]
+        from xauusd.domain.types import Quote
+
+        snap = replace(base, liquidity=tuple(pools), quote=Quote(NOW, entry - 0.01, entry + 0.01))
+        eng = ExpansionPullbackEngine(Settings())
+        return eng._liquidity_target(snap, Direction.LONG, entry, risk)
+
+    def test_a_level_inside_the_floor_is_not_a_target(self, base_snapshot) -> None:
+        """The defect itself: a level 0.5R away used to become THE target, and the
+        1.5 floor then refused the whole setup."""
+        assert self._target(base_snapshot, [self._pool(2000.5)]) is None
+
+    def test_the_nearest_level_beyond_the_floor_is_chosen(self, base_snapshot) -> None:
+        """Nearest, not furthest. Skipping a viable level to reach a better ratio is
+        exactly what §26 forbids, and this is the test that would catch it."""
+        got = self._target(
+            base_snapshot, [self._pool(2000.5), self._pool(2001.6), self._pool(2004.0)]
+        )
+        assert got == pytest.approx(2001.6)
+
+    def test_it_never_invents_a_price(self, base_snapshot) -> None:
+        prices = [2000.5, 2002.0, 2003.0]
+        got = self._target(base_snapshot, [self._pool(p) for p in prices])
+        assert got in prices
+
+    def test_spent_liquidity_is_not_a_target(self, base_snapshot) -> None:
+        """A pool that has already been swept is not resting liquidity — the mistake
+        FINDINGS 41 cost four signals in five on the scalp side."""
+        assert self._target(base_snapshot, [self._pool(2002.0, swept=True)]) is None
+
+    def test_liquidity_behind_the_entry_is_not_a_target(self, base_snapshot) -> None:
+        assert self._target(base_snapshot, [self._pool(1997.0)]) is None
+
+    def test_the_floor_scales_with_the_risk(self, base_snapshot) -> None:
+        """It is min_rr times THIS trade's risk, not a fixed distance."""
+        pool = [self._pool(2002.0)]
+        assert self._target(base_snapshot, pool, risk=1.0) == pytest.approx(2002.0)
+        assert self._target(base_snapshot, pool, risk=2.0) is None
+
+    def test_the_old_behaviour_is_still_reachable_by_configuration(self, base_snapshot) -> None:
+        """Turning it off must restore "nearest level, whatever it is" — otherwise the
+        flag is decoration and the measurement in FINDINGS 45 cannot be reproduced."""
+        from xauusd.domain.types import Quote
+
+        snap = replace(
+            base_snapshot,
+            liquidity=(self._pool(2000.5), self._pool(2004.0)),
+            quote=Quote(NOW, 1999.99, 2000.01),
+        )
+        eng = ExpansionPullbackEngine(Settings(intraday={"target_must_clear_rr_floor": False}))
+        assert eng._liquidity_target(snap, Direction.LONG, 2000.0, 1.0) == pytest.approx(2000.5)
+
+    def test_a_short_looks_the_other_way(self, base_snapshot) -> None:
+        from xauusd.domain.types import Quote
+
+        snap = replace(
+            base_snapshot,
+            liquidity=(self._pool(1999.5), self._pool(1998.0), self._pool(2002.0)),
+            quote=Quote(NOW, 1999.99, 2000.01),
+        )
+        eng = ExpansionPullbackEngine(Settings())
+        got = eng._liquidity_target(snap, Direction.SHORT, 2000.0, 1.0)
+        assert got == pytest.approx(1998.0)
+
+
+class TestRiskAndFrequencyAreTheSameDial:
+    """The interaction that made "two trades in four weeks" look like a setup problem.
+
+    `DrawdownGuard` locks a period when drawdown from the high-water mark reaches its
+    limit, so per-trade risk sets a hard ceiling on how many losing trades a week can
+    contain. A frequency target that ignores this is unreachable by construction.
+    """
+
+    def test_two_percent_per_trade_ends_the_day_on_one_loss(self) -> None:
+        day, week = Settings().losses_before_lockout(0.02)
+        assert day == 1
+        assert week == 3
+
+    def test_one_percent_carries_an_all_losing_week_of_five(self) -> None:
+        """Which is what a 2-5 trades/week target actually requires."""
+        day, week = Settings().losses_before_lockout(0.01)
+        assert day == 2
+        assert week >= 5
+
+    def test_the_shipped_intraday_risk_supports_the_target_frequency(self) -> None:
+        s = Settings()
+        _, week = s.losses_before_lockout(s.intraday.risk_pct)
+        assert week >= 5, (
+            "the intraday engine cannot deliver 2-5 trades a week if a losing week "
+            "locks it out before the fifth"
+        )
+
+    def test_it_is_monotonic_and_never_divides_by_zero(self) -> None:
+        s = Settings()
+        assert s.losses_before_lockout(0.0) == (0, 0)
+        assert s.losses_before_lockout(0.005)[1] > s.losses_before_lockout(0.02)[1]
